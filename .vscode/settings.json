@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^py -m compileall c:\\\\PROJ\\\\WEEX\\\\auraquant\\\\src$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

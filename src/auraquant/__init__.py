@@ -1,0 +1,1 @@
+"""AuraQuant package (MVP scaffold)."""

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# Env
+.env
+
+# Logs
+*.log
+
+# Generated demo logs
+ai_logs/
+
+# OS
+.DS_Store
+Thumbs.db
