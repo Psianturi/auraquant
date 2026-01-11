@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from ..risk.types import Side, TradeResult
+from .base_order_manager import BaseOrderManager
 
 
 @dataclass
@@ -20,7 +21,7 @@ class PaperPosition:
     order_id: str | None = None  # order_id (paper uses simulated ID)
 
 
-class PaperOrderManager:
+class PaperOrderManager(BaseOrderManager):
     """Deterministic paper execution.
 
     Responsibilities:
@@ -124,3 +125,7 @@ class PaperOrderManager:
         if pos.side == "SHORT":
             ret = -ret
         return float(pos.notional_usdt) * float(ret)
+
+    def reconcile(self, now: datetime | None = None) -> None:
+        # Paper execution is authoritative; nothing to sync.
+        return None

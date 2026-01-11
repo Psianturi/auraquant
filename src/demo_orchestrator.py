@@ -171,7 +171,7 @@ def main() -> None:
         ai_log_store=ai_log_store,
     )
 
-    target_closed_trades = 5
+    target_closed_trades = 10
     max_ticks = 5000
 
     t = now
