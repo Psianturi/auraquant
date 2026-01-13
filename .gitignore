@@ -19,6 +19,19 @@ venv/
 # Generated demo logs
 ai_logs/
 
+# Testing & troubleshooting files (not for production)
+src/weex_troubleshoot.py
+src/weex_demo_test.py
+src/weex_api_tester.py
+src/weex_official_tester.py
+src/weex_alternative_tester.py
+src/weex_public_smoketest.py
+src/weex_symbol_tester.py
+src/cryptopanic_tester.py
+src/mock_weex_tester.py
+src/upload_ai_log.py
+weex_troubleshooting_report.json
+
 # OS
 .DS_Store
 Thumbs.db

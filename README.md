@@ -1,6 +1,6 @@
 # AuraQuant
 
-**A Hybrid Multi-Agent AI Trading System for WEEX AI Hackathon**
+**A Hybrid Multi-Agent AI Trading System**
 
 AuraQuant is an AI-driven trading agent integrating NLP sentiment analysis, cross-asset correlation modeling, and dynamic risk management.
 
@@ -38,22 +38,61 @@ AuraQuant is an AI-driven trading agent integrating NLP sentiment analysis, cros
 ## Key Features
 
 - **State Machine** - Prevents order spam and race conditions
-- **Circuit Breaker** - Auto-stop on daily drawdown (-2%) or loss streak (3)
+- **Circuit Breaker** - Auto-stop on daily drawdown or loss streak
 - **ATR-based SL/TP** - Dynamic stops based on volatility
 - **Online Learning** - Adaptive P(win) estimation from trade outcomes
-- **AI Log Store** - NDJSON format ready for WEEX upload
+- **AI Log Store** - NDJSON format for audit trail
 
 ## Quick Start
 
+### Installation
+
 ```bash
 pip install -r requirements.txt
-
-# Demo (paper trading with synthetic data)
-python src/demo_orchestrator.py
-
-# WEEX public API test
-python src/weex_public_smoketest.py
 ```
+
+### Configuration
+
+Copy `.env.example` to `.env` and configure your API credentials:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your credentials:
+- WEEX API credentials (API key, secret, passphrase)
+- CryptoPanic API token for news sentiment
+- Google Gemini API key for NLP analysis (optional)
+
+### Running the System
+
+**Paper Trading Demo:**
+```bash
+python src/demo_orchestrator.py
+```
+
+**Test WEEX API Connection:**
+```bash
+python src/weex_api_tester.py
+```
+
+**Test CryptoPanic News Integration:**
+```bash
+python src/cryptopanic_tester.py
+```
+
+**Mock Trading Simulation:**
+```bash
+python src/mock_weex_tester.py
+```
+
+### System Validation
+
+```bash
+python src/system_validation.py
+```
+
+This will run comprehensive tests on all components and generate performance reports.
 
 ## Project Structure
 
@@ -73,29 +112,60 @@ src/auraquant/
 
 ## Configuration
 
+### Trading Parameters
+
 **OrchestratorConfig:**
-- `symbol = "SOL/USDT"` - Target pair
-- `default_leverage = 10.0` - Conservative
-- `min_confidence = 0.3` - Trade threshold
+- `symbol` - Target trading pair (e.g., "SOL/USDT")
+- `default_leverage` - Leverage multiplier (default: 10.0)
+- `min_confidence` - Minimum confidence threshold for trade entry
+- `min_entry_interval_seconds` - Cooldown between trades
+- `tick_seconds` - Time interval for each trading cycle
 
 **RiskEngine:**
-- `daily_drawdown_limit_pct = -2.0`
-- `max_consecutive_losses = 3`
-- `risk_per_trade_pct = 0.5`
-- `sl_atr_mult = 1.5`, `tp_atr_mult = 3.0`
+- `daily_drawdown_limit_pct` - Maximum daily loss before circuit breaker
+- `max_consecutive_losses` - Loss streak limit before cooldown
+- `risk_per_trade_pct` - Position size as percentage of equity
+- `sl_atr_mult` - Stop loss multiplier based on ATR
+- `tp_atr_mult` - Take profit multiplier based on ATR
 
-## AI Evidence Logging
+### Environment Variables
+
+See `.env.example` for complete list of configuration options.
+
+## AI Decision Logging
+
+All AI decisions are logged in NDJSON format for transparency and audit:
 
 ```json
 {
-  "module": "RiskEngine",
-  "decision": "APPROVED",
-  "metrics": {
-    "equity_now": 1000.0,
-    "stop_loss": 97.73,
-    "take_profit": 99.98
-  }
+  "stage": "QUALIFY",
+  "model": "AuraQuant.CorrelationTrigger",
+  "input": {"symbol": "SOL/USDT", "bias": "LONG"},
+  "output": {"correlation": 0.93, "signal": "APPROVED"},
+  "explanation": "Cross-asset correlation confirmation",
+  "timestamp": "2026-01-13T14:00:00Z"
 }
 ```
+
+Logs are stored in `ai_logs/` directory.
+
+## Performance Monitoring
+
+The system tracks:
+- Equity curve and PnL
+- Win rate and Sharpe ratio
+- Drawdown metrics
+- Trade execution statistics
+- Model learning progress
+
+## License
+
+MIT License - See LICENSE file for details.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
+
+
 
 

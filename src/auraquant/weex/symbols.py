@@ -16,8 +16,8 @@ WEEX_ALLOWED_CONTRACT_SYMBOLS: Set[str] = {
 
 def to_weex_contract_symbol(symbol: str) -> str:
     """Map internal symbol like 'BTC/USDT' -> 'cmt_btcusdt'."""
-
-    s = symbol.replace("/", "").lower()
+    
+    s = symbol.replace("/", "").lower() 
     return f"cmt_{s}"
 
 
