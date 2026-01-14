@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+import json
 
 import logging
 
@@ -38,6 +41,49 @@ class CircuitBreaker:
     equity_day_start: Optional[float] = None
     day: Optional[date] = None
     consecutive_losses: int = 0
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "type": "circuit_breaker_v1",
+            "state": self.state.value,
+            "cooldown_until": utc_iso(self.cooldown_until) if self.cooldown_until else None,
+            "equity_day_start": self.equity_day_start,
+            "day": self.day.isoformat() if self.day else None,
+            "consecutive_losses": int(self.consecutive_losses),
+            "daily_drawdown_limit_pct": float(self.daily_drawdown_limit_pct),
+            "max_consecutive_losses": int(self.max_consecutive_losses),
+            "cooldown_minutes": int(self.cooldown_minutes),
+        }
+
+    @classmethod
+    def from_json(cls, obj: Dict[str, Any]) -> "CircuitBreaker":
+        if obj.get("type") != "circuit_breaker_v1":
+            raise ValueError("Unsupported circuit breaker state")
+        cb = cls(
+            daily_drawdown_limit_pct=float(obj.get("daily_drawdown_limit_pct", -2.0)),
+            max_consecutive_losses=int(obj.get("max_consecutive_losses", 3)),
+            cooldown_minutes=int(obj.get("cooldown_minutes", 60)),
+        )
+        state = str(obj.get("state", CircuitState.NORMAL.value))
+        cb.state = CircuitState(state) if state in {s.value for s in CircuitState} else CircuitState.NORMAL
+
+        day_s = obj.get("day")
+        if isinstance(day_s, str) and day_s:
+            try:
+                cb.day = date.fromisoformat(day_s)
+            except Exception:
+                cb.day = None
+
+        cb.equity_day_start = float(obj["equity_day_start"]) if obj.get("equity_day_start") is not None else None
+        cb.consecutive_losses = int(obj.get("consecutive_losses", 0))
+
+        cu = obj.get("cooldown_until")
+        if isinstance(cu, str) and cu:
+            try:
+                cb.cooldown_until = datetime.fromisoformat(cu.replace("Z", "+00:00")).replace(tzinfo=None)
+            except Exception:
+                cb.cooldown_until = None
+        return cb
 
     def _ensure_day(self, now: datetime) -> None:
         today = now.date()
@@ -130,6 +176,9 @@ class RiskEngine:
     logger: logging.Logger
     circuit_breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
 
+    state_path: Optional[str] = None
+    _state_loaded: bool = field(default=False, init=False, repr=False)
+
     max_leverage_allowed: float = 20.0
     risk_per_trade_pct: float = 0.5
     max_position_notional_pct: float = 10.0
@@ -139,6 +188,12 @@ class RiskEngine:
 
     def validate_intent(self, intent_data: TradeIntent, equity_now: float, now: Optional[datetime] = None) -> RiskDecision:
         now = now or datetime.utcnow()
+
+        # Load persisted circuit breaker state once per process (best-effort).
+        if self.state_path and not self._state_loaded:
+            self._load_state_best_effort()
+            self._state_loaded = True
+
         self.circuit_breaker.set_day_start_equity_if_missing(equity_now, now)
 
         allow, cb_reason, cb_metrics = self.circuit_breaker.evaluate(equity_now, now)
@@ -244,6 +299,9 @@ class RiskEngine:
         now = now or datetime.utcnow()
         self.circuit_breaker.update_after_trade(trade_result=trade_result, equity_now=float(equity_now), now=now)
 
+        if self.state_path:
+            self._save_state_best_effort()
+
         payload = {
             "module": "RiskEngine",
             "timestamp": utc_iso(now),
@@ -260,6 +318,27 @@ class RiskEngine:
             },
         }
         log_json(self.logger, payload, level=logging.INFO)
+
+    def _load_state_best_effort(self) -> None:
+        try:
+            p = Path(str(self.state_path))
+            if not p.exists():
+                return
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(obj, dict):
+                return
+            self.circuit_breaker = CircuitBreaker.from_json(obj)
+        except Exception:
+            # Do not block trading because state couldn't be loaded.
+            return
+
+    def _save_state_best_effort(self) -> None:
+        try:
+            p = Path(str(self.state_path))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(self.circuit_breaker.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            return
 
     def _calculate_position_notional(
         self,

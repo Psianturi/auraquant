@@ -10,7 +10,7 @@ from ..correlation import CorrelationTrigger
 from ..risk import RiskEngine, TradeIntent
 from ..sentiment import SentimentProcessor
 from ..util.jsonlog import log_json, utc_iso
-from ..execution.paper_order_manager import PaperOrderManager
+from ..execution.base_order_manager import BaseOrderManager
 from ..util.ai_log.store import AiLogEvent, AiLogStore
 from ..weex import is_allowed_contract_symbol, to_weex_contract_symbol
 from ..learning import TradePolicyLearner, extract_features
@@ -40,7 +40,7 @@ class Orchestrator:
     correlation: CorrelationTrigger
     risk: RiskEngine
     prices: MultiPriceProvider
-    execution: PaperOrderManager
+    execution: BaseOrderManager
 
     learner: Optional[TradePolicyLearner] = None
 
@@ -414,6 +414,14 @@ class Orchestrator:
         log_json(self.logger, payload, level=logging.INFO)
 
     def _reconcile(self, tick: TickContext) -> ReconcileSnapshot:
+
+        # Paper execution is authoritative, so reconcile() is a no-op there.
+        try:
+            self.execution.reconcile(now=tick.now)
+        except TypeError:
+            # Backward compatibility if a concrete manager still has reconcile() without kwargs.
+            self.execution.reconcile()  # type: ignore[call-arg]
+
         pos = self.execution.position()
         snap_pos: Optional[PositionSnapshot] = None
         if pos is not None:

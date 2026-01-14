@@ -9,13 +9,7 @@ import os
 import requests
 
 from .multi_price_provider import MultiPriceProvider
-
-
-def _to_weex_contract_symbol(symbol: str) -> str:
-    """Map internal symbol like 'BTC/USDT' -> WEEX contract symbol like 'cmt_btcusdt'."""
-
-    s = symbol.replace("/", "").lower()
-    return f"cmt_{s}"
+from ..weex.symbols import to_weex_contract_symbol
 
 
 @dataclass
@@ -47,7 +41,7 @@ class WeexRestMultiPriceProvider(MultiPriceProvider):
         out: Dict[str, Tuple[float, float]] = {}
 
         for sym in symbols:
-            weex_sym = _to_weex_contract_symbol(sym)
+            weex_sym = to_weex_contract_symbol(sym)
             url = f"{self.base_url}/capi/v2/market/ticker"
             resp = self._session.get(url, params={"symbol": weex_sym}, timeout=10)
             resp.raise_for_status()

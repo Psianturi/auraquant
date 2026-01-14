@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -30,6 +31,14 @@ class AiLogEvent:
     order_id: Optional[int] = None
     timestamp: Optional[datetime] = None
 
+    def _timestamp_iso(self) -> Optional[str]:
+        if self.timestamp is None:
+            return None
+        ts = self.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.isoformat().replace("+00:00", "Z")
+
     def to_payload(self) -> Dict[str, Any]:
         exp = (self.explanation or "").strip()
         if len(exp) > 1000:
@@ -43,6 +52,19 @@ class AiLogEvent:
             "explanation": exp,
         }
 
+    def to_record(self) -> Dict[str, Any]:
+        """Local NDJSON record for audit/debug.
+
+        Includes a timestamp when available, but keeps WEEX payload shape intact.
+        The uploader strips any extra keys before uploading.
+        """
+
+        rec = dict(self.to_payload())
+        ts = self._timestamp_iso()
+        if ts:
+            rec["timestamp"] = ts
+        return rec
+
 
 class AiLogStore:
     """Append-only NDJSON store for AI logs.
@@ -55,7 +77,7 @@ class AiLogStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, event: AiLogEvent) -> None:
-        payload = event.to_payload()
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        record = event.to_record()
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         with self.path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")

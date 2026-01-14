@@ -19,6 +19,12 @@ venv/
 # Generated demo logs
 ai_logs/
 
+# Runtime cache (CoinGecko snapshots, etc.)
+runtime_cache/
+
+# Local VPS helper scripts (keep local; do not commit)
+scripts/vps_*.sh
+
 # Testing & troubleshooting files (not for production)
 src/weex_troubleshoot.py
 src/weex_demo_test.py

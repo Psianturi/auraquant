@@ -10,6 +10,14 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional
 import requests
 
 
+WEEX_REQUIRED_KEYS = {"stage", "model", "input", "output", "explanation", "orderId"}
+
+
+def to_weex_payload(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only the keys expected by WEEX uploadAiLog payload."""
+    return {k: record.get(k) for k in WEEX_REQUIRED_KEYS if k in record}
+
+
 def iter_ndjson(path: str | Path) -> Iterator[Dict[str, Any]]:
     p = Path(path)
     with p.open("r", encoding="utf-8") as f:
@@ -42,7 +50,8 @@ class AiLogBatchUploader:
         hdrs = {"Content-Type": "application/json"}
         if self.headers:
             hdrs.update(self.headers)
-        resp = requests.post(self.url, json=events, headers=hdrs, timeout=self.timeout_seconds)
+        payload = [to_weex_payload(e) for e in events]
+        resp = requests.post(self.url, json=payload, headers=hdrs, timeout=self.timeout_seconds)
         resp.raise_for_status()
         return resp
 

@@ -73,7 +73,7 @@ python src/demo_orchestrator.py
 
 **Test WEEX API Connection:**
 ```bash
-python src/weex_api_tester.py
+python src/test_weex_real.py
 ```
 
 **Test CryptoPanic News Integration:**
@@ -148,6 +148,74 @@ All AI decisions are logged in NDJSON format for transparency and audit:
 ```
 
 Logs are stored in `ai_logs/` directory.
+
+## How CoinGecko API Is Used (CoinGecko Track)
+
+AuraQuant can optionally use CoinGecko API to improve **market discovery** and **strategy workflow**
+without changing WEEX execution correctness.
+
+What we use CoinGecko for:
+- **Universe selection** across the 8 allowed WEEX competition pairs (BTC/ETH/SOL/DOGE/XRP/ADA/BNB/LTC).
+- **Liquidity-aware selection** using CoinGecko market snapshots (24h volume + 24h move) to pick the most tradable asset.
+- **Research-ready snapshots** cached to disk so the bot can survive CoinGecko rate limits/outages (stale cache fallback).
+
+Implementation:
+- CoinGecko REST client + disk cache: [src/auraquant/data/coingecko_client.py](src/auraquant/data/coingecko_client.py)
+- Smoke test / demo script: [src/coingecko_smoketest.py](src/coingecko_smoketest.py)
+
+Endpoints used:
+- `GET /api/v3/coins/markets` (CoinGecko) for market discovery & selection
+
+Configuration (never commit keys):
+- `COINGECKO_API_KEY` (Analyst plan key if issued)
+- `COINGECKO_BASE_URL` (optional override; if `COINGECKO_API_KEY` is set, defaults to Pro `https://pro-api.coingecko.com/api/v3`)
+- `COINGECKO_CACHE_DIR` (defaults to `runtime_cache/coingecko`)
+
+Run locally:
+- `python src/coingecko_smoketest.py`
+
+## WEEX API Testing Checklist (Official Flow)
+
+Use this script for the official API test flow + evidence logging:
+
+- `python src/test_weex_real.py`
+
+
+### 1) Dry-run first (no real orders)
+
+```bash
+python src/test_weex_real.py --log-file ai_logs/weex_api_test.log
+```
+
+### 2) Execute the required trades (opt-in)
+
+Default order mode is `market_notional` and targets ~10 USDT notional.
+
+Linux/macOS:
+
+```bash
+WEEX_EXECUTE_ORDER=1 WEEX_TRADE_REPEAT=10 WEEX_TRADE_SLEEP=1 \
+python src/test_weex_real.py --log-file ai_logs/weex_api_test_exec.log
+```
+
+Windows PowerShell:
+
+```powershell
+$env:WEEX_EXECUTE_ORDER="1"
+$env:WEEX_TRADE_REPEAT="10"
+$env:WEEX_TRADE_SLEEP="1"
+python src/test_weex_real.py --log-file ai_logs/weex_api_test_exec.log
+```
+
+### 3) What to verify in the log
+
+- `/capi/v2/products` succeeded (or fallback symbol used)
+- `/capi/v2/account/assets` returns OK (test funds visible)
+- `/capi/v2/account/leverage` returns OK
+- `/capi/v2/order/placeOrder` returns `200` and includes `order_id`
+- `/capi/v2/order/fills` shows fills for each `order_id`
+
+Tip: if a symbol is rejected, follow the script guidance to use the exact symbol returned by `/products`.
 
 ## Performance Monitoring
 
