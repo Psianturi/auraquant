@@ -338,7 +338,6 @@ print(f"Leverage: {safe_int_leverage(DEFAULT_LEVERAGE)}x")
 print(f"Order:    {ORDER_MODE}")
 print(f"Repeat:   {TRADE_REPEAT}x (sleep {TRADE_SLEEP_SECONDS}s)")
 print(f"Execute:  {'YES' if EXECUTE_ORDER else 'NO (set WEEX_EXECUTE_ORDER=1 to execute)'}")
-print(f"API Key: {API_KEY[:20]}..." if API_KEY else "API Key: <missing>")
 print("=" * 70)
 print()
 
