@@ -304,7 +304,7 @@ class WeexOrderManager(BaseOrderManager):
                 items = [data]
 
         min_order_size: Optional[float] = None
-        step_size: float = 1.0
+        step_size: Optional[float] = None
 
         if items and isinstance(items[0], dict):
             first = items[0]
@@ -323,12 +323,22 @@ class WeexOrderManager(BaseOrderManager):
                 if inc is None:
                     continue
                 try:
-                    step_size = float(inc)
-                    if step_size <= 0:
-                        step_size = 1.0
+                    candidate = float(inc)
                 except Exception:
-                    step_size = 1.0
-                break
+                    continue
+
+                # Some WEEX contract payloads expose `size_increment=0` while still
+                # enforcing a non-1 lot size via minOrderSize (e.g. DOGE=100, ADA=10).
+                # Treat non-positive increments as unusable and fall back later.
+                if candidate > 0:
+                    step_size = candidate
+                    break
+
+        if step_size is None or step_size <= 0:
+            if isinstance(min_order_size, (int, float)) and float(min_order_size) > 0:
+                step_size = float(min_order_size)
+            else:
+                step_size = 1.0
 
         self._contract_rules_cache[weex_symbol] = (min_order_size, float(step_size))
         return self._contract_rules_cache[weex_symbol]
@@ -343,7 +353,7 @@ class WeexOrderManager(BaseOrderManager):
 
         step = float(step_size) if float(step_size) > 0 else 1.0
         # Quantize down to the allowed increment (e.g. stepSize=10 => 40, 50, ...)
-        floored = math.floor(raw / step) * step
+        floored = math.floor((raw / step) + 1e-12) * step
         # If we floored to zero but a min size exists, bump to the smallest valid step >= min.
         if floored <= 0 and isinstance(min_order_size, (int, float)) and float(min_order_size) > 0:
             floored = math.ceil(float(min_order_size) / step) * step
