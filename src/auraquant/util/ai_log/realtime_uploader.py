@@ -258,14 +258,28 @@ def make_uploader_from_env(queue_dir: str | Path = "ai_logs/.upload_queue") -> O
     - WEEX_AI_LOG_AUTH_HEADER (optional, e.g., "Authorization:Bearer XXX")
     """
     upload_url = os.getenv("WEEX_AI_LOG_UPLOAD_URL")
+
+    weex_api_key = os.getenv("WEEX_API_KEY")
+    weex_secret_key = os.getenv("WEEX_SECRET_KEY")
+    weex_passphrase = os.getenv("WEEX_PASSPHRASE")
+
     if not upload_url:
-        # Missing URL is common in local testing; keep it informational unless explicitly required.
-        optional = os.getenv("WEEX_AI_LOG_UPLOAD_OPTIONAL", "1")
-        if optional == "1":
-            logger.info("[AI Log Uploader] WEEX_AI_LOG_UPLOAD_URL not set. Uploader disabled.")
+        # If credentials exist, default to official UploadAiLog endpoint.
+        if weex_api_key and weex_secret_key and weex_passphrase:
+            upload_url = "https://api-contract.weex.com/capi/v2/order/uploadAiLog"
+            logger.info("[AI Log Uploader] WEEX_AI_LOG_UPLOAD_URL not set. Using default UploadAiLog endpoint.")
         else:
-            logger.warning("[AI Log Uploader] WEEX_AI_LOG_UPLOAD_URL not set. Uploader disabled.")
-        return None
+
+            optional = os.getenv("WEEX_AI_LOG_UPLOAD_OPTIONAL", "1")
+            msg = (
+                "[AI Log Uploader] WEEX_AI_LOG_UPLOAD_URL not set. Uploader disabled. "
+                "Set WEEX_AI_LOG_UPLOAD_URL or provide WEEX_API_KEY/WEEX_SECRET_KEY/WEEX_PASSPHRASE."
+            )
+            if optional == "1":
+                logger.info(msg)
+            else:
+                logger.warning(msg)
+            return None
 
     headers: Dict[str, str] = {}
     auth = os.getenv("WEEX_AI_LOG_AUTH_HEADER")
@@ -274,10 +288,6 @@ def make_uploader_from_env(queue_dir: str | Path = "ai_logs/.upload_queue") -> O
         if ":" in auth:
             k, v = auth.split(":", 1)
             headers[k.strip()] = v.strip()
-
-    weex_api_key = os.getenv("WEEX_API_KEY")
-    weex_secret_key = os.getenv("WEEX_SECRET_KEY")
-    weex_passphrase = os.getenv("WEEX_PASSPHRASE")
 
     return RealTimeAiLogUploader(
         weex_upload_url=upload_url,
