@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
+"""Autonomous Orchestrator Real-Time Test.
 
+Runs the real AuraQuant state-machine orchestrator for a fixed duration.
+The bot decides autonomously whether to trade or skip.
 
 Usage:
-    python src/test_demo_orchestrator_realtime.py --duration 550 --min-trades 10
+    python src/test_demo_orchestrator_realtime.py --duration 600 --min-trades 10
 
 Environment:
     WEEX_AI_LOG_UPLOAD_URL (optional; enables real-time upload)
