@@ -296,8 +296,12 @@ class WeexOrderManager(BaseOrderManager):
         items = None
         if isinstance(payload, list):
             items = payload
-        elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
-            items = payload.get("data")
+        elif isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = [data]
 
         min_order_size: Optional[float] = None
         step_size: float = 1.0
