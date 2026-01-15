@@ -234,11 +234,11 @@ class AutonomousOrchestratorTest:
         risk = RiskEngine(logger=bot_logger)
         
         # Cooldown after consecutive losses: 5 min for testing, 45 min for production
-        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "5"))
+        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "4"))
 
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "1.6"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "3.0"))
 
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "5.0"))
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "6.0"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 

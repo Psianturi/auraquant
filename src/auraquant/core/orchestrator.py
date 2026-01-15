@@ -363,15 +363,29 @@ class Orchestrator:
         assert decision.stop_loss is not None
         assert decision.take_profit is not None
 
-        self.execution.open_position(
-            symbol=tick.symbol,
-            side=decision.side,
-            entry_price=decision.entry_price,
-            stop_loss=decision.stop_loss,
-            take_profit=decision.take_profit,
-            notional_usdt=decision.position_notional_usdt,
-            now=tick.now,
-        )
+        try:
+            self.execution.open_position(
+                symbol=tick.symbol,
+                side=decision.side,
+                entry_price=decision.entry_price,
+                stop_loss=decision.stop_loss,
+                take_profit=decision.take_profit,
+                notional_usdt=decision.position_notional_usdt,
+                now=tick.now,
+            )
+        except RuntimeError as e:
+            err_msg = str(e)
+            if "40015" in err_msg or "margin" in err_msg.lower():
+                log_json(self.logger, {
+                    "module": "Orchestrator",
+                    "timestamp": utc_iso(tick.now),
+                    "event": "ORDER_SKIPPED",
+                    "symbol": tick.symbol,
+                    "reason": "Insufficient margin",
+                    "error": err_msg[:100],
+                }, level=logging.WARNING)
+                return
+            raise  # Re-raise other errors
         self.last_entry_at = tick.now
 
         if self.learner is not None:
