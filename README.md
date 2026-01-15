@@ -149,6 +149,87 @@ All AI decisions are logged in NDJSON format for transparency and audit:
 
 Logs are stored in `ai_logs/` directory.
 
+## WEEX AI Log Compliance (Real-time Upload)
+
+**WEEX Requirements:**
+- Every AI decision must upload to WEEX within **1 minute** (real-time, not batch).
+- All orders (open/close/conditional) logged with `order_id`.
+- Retry + disk queue on network failures.
+- No sampling; 100% logging required.
+
+**Configuration (.env):**
+```bash
+WEEX_AI_LOG_UPLOAD_URL="https://www.weex.com/api/ai/log/submit"
+WEEX_AI_LOG_AUTH_HEADER="Authorization:Bearer <token>"
+```
+
+**Status:**
+- ✅ Orchestrator integrates RealTimeAiLogUploader
+- ✅ Async background thread + 60s flush interval
+- ✅ Network failure → disk queue + exponential retry
+
+## WEEX AI Log Compliance
+
+**Mandatory for competition:** All AI logs must be uploaded in real-time to WEEX for verification and ranking.
+
+### Real-Time Upload
+
+Configure the orchestrator with real-time uploader to push logs automatically (<1 minute delay):
+
+1. Set environment variables:
+   ```bash
+   export WEEX_AI_LOG_UPLOAD_URL="https://api.weex.com/... (provided by WEEX)"
+   export WEEX_AI_LOG_AUTH_HEADER="Authorization:Bearer YOUR_TOKEN"
+   ```
+
+2. The orchestrator auto-starts the background uploader thread when `ai_log_uploader` is initialized.
+
+3. Each AI decision (SCAN, QUALIFY, ENTER, MANAGE, EXIT, RECONCILE) is pushed real-time.
+
+### Network Error Handling
+
+If upload fails due to network error:
+- Event is persisted to disk queue (`ai_logs/.upload_queue/`)
+- Background retry thread attempts re-upload every 30 seconds
+- Max retries: 3 attempts (configurable)
+
+If all retries fail:
+- Log locally and save proof of network error
+- Submit error logs + proof after competition ends
+
+### Required Fields
+
+All uploads include these mandatory fields:
+- `stage` (str): Bot phase (SCAN, QUALIFY, ENTER, MANAGE, EXIT, RECONCILE)
+- `model` (str): Model name (e.g., "AuraQuant.CorrelationTrigger")
+- `input` (JSON): Model inputs
+- `output` (JSON): Model outputs
+- `explanation` (str): Human-readable summary (≤1000 chars)
+- `orderId` (int, optional): Order ID if trade was placed
+
+### Compliance Checklist
+
+| Item | Requirement | Status |
+|------|-------------|--------|
+| Real-time upload | <1 min delay, every AI decision | ✅ Implemented |
+| All orders logged | Market, limit, conditional + order_id | ✅ Via orchestrator |
+| Network retry | Local queue + background retry | ✅ Implemented |
+| Exact field names | Request body matches WEEX spec | ✅ Validated |
+| No credential leak | API keys never in logs | ✅ .env ignored |
+| AI participation | Must prove AI involvement in strategy | ✅ Sentiment/Correlation/Risk logs |
+| Minimum 10 trades | Prevent "idle participation" | ✅ Enforced at competition |
+| Leverage ≤20x | Anti-gambling rule | ✅ Configurable in RiskEngine |
+
+### Testing Upload (Before Competition)
+
+Run a dry-run with logging enabled:
+
+```bash
+WEEX_AI_LOG_UPLOAD_URL="https://..." python src/demo_orchestrator.py
+```
+
+Check `/ai_logs/` for local records, and verify WEEX dashboard shows events received.
+
 ## How CoinGecko API Is Used (CoinGecko Track)
 
 AuraQuant can optionally use CoinGecko API to improve **market discovery** and **strategy workflow**

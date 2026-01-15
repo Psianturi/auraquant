@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from ..data.multi_price_provider import MultiPriceProvider
@@ -12,6 +12,7 @@ from ..sentiment import SentimentProcessor
 from ..util.jsonlog import log_json, utc_iso
 from ..execution.base_order_manager import BaseOrderManager
 from ..util.ai_log.store import AiLogEvent, AiLogStore
+from ..util.ai_log.realtime_uploader import RealTimeAiLogUploader
 from ..weex import is_allowed_contract_symbol, to_weex_contract_symbol
 from ..learning import TradePolicyLearner, extract_features
 
@@ -45,6 +46,7 @@ class Orchestrator:
     learner: Optional[TradePolicyLearner] = None
 
     ai_log_store: Optional[AiLogStore] = None
+    ai_log_uploader: Optional[RealTimeAiLogUploader] = None
 
     phase: BotPhase = BotPhase.SCAN
     last_entry_at: Optional[datetime] = None
@@ -493,4 +495,36 @@ class Orchestrator:
                     timestamp=tick.now,
                 )
             )
-        return snapshot
+
+    def _push_ai_log(
+        self,
+        stage: str,
+        model: str,
+        input_dict: Dict,
+        output_dict: Dict,
+        explanation: str,
+        order_id: Optional[int] = None,
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Helper: append to local store AND push to real-time uploader (if configured).
+
+        Ensures WEEX compliance: every AI decision is logged real-time (max 1 min delay).
+        """
+        event = AiLogEvent(
+            stage=stage,
+            model=model,
+            input=input_dict,
+            output=output_dict,
+            explanation=explanation,
+            order_id=order_id,
+            timestamp=timestamp or datetime.now(timezone.utc),
+        )
+
+        # Always store locally (audit trail)
+        if self.ai_log_store is not None:
+            self.ai_log_store.append(event)
+
+        # Push to WEEX real-time uploader (if configured)
+        if self.ai_log_uploader is not None:
+            payload = event.to_payload()
+            self.ai_log_uploader.upload(payload)
