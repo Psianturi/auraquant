@@ -24,7 +24,10 @@ SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from dotenv import load_dotenv
 from auraquant.util.ai_log import AiLogStore, AiLogEvent, make_uploader_from_env
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
