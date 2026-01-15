@@ -126,8 +126,13 @@ class AutonomousOrchestratorTest:
         bot_logger = logging.getLogger("auraquant.orch_test")
         prices = WeexRestMultiPriceProvider()
         sentiment = SentimentProcessor(logger=bot_logger, provider=AlternatingNewsProvider())
+        # For this live test we want the bot to "think" every tick; disable TTL caching.
+        sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
         risk = RiskEngine(logger=bot_logger)
+  
+        risk.sl_atr_mult = 0.75
+        risk.tp_atr_mult = 1.25
         execution = PaperOrderManager(starting_equity=1000.0)
 
         # Make it possible to hit >=10 entries in 10 minutes.
