@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
-"""
-Autonomous Orchestrator Real-Time Test (10-12 minutes with AI logging).
 
-Simple autonomous trading test: bot runs for 10-12 minutes, makes decisions based on
-orchestrator's sentiment + correlation logic, logs all AI decisions real-time to WEEX.
+
 
 Usage:
-  python src/test_demo_orchestrator_realtime.py --duration 600
+    python src/test_demo_orchestrator_realtime.py --duration 550 --min-trades 10
 
 Environment:
-  WEEX_API_KEY, WEEX_SECRET_KEY, WEEX_PASSPHRASE (for HMAC auth)
-  WEEX_AI_LOG_UPLOAD_URL (for real-time logging, optional)
+    WEEX_AI_LOG_UPLOAD_URL (optional; enables real-time upload)
+    WEEX_API_KEY, WEEX_SECRET_KEY, WEEX_PASSPHRASE (only if upload enabled)
 """
 
 import argparse
-import json
 import logging
-import os
 import sys
 import time
-import random
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SRC_DIR = Path(__file__).resolve().parent
@@ -28,9 +23,22 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from dotenv import load_dotenv
-from auraquant.util.ai_log import AiLogStore, make_uploader_from_env
 
-load_dotenv()
+from auraquant.core.orchestrator import Orchestrator
+from auraquant.core.types import OrchestratorConfig
+from auraquant.correlation.correlation_trigger import CorrelationTrigger
+from auraquant.data.weex_rest_price_provider import WeexRestMultiPriceProvider
+from auraquant.execution.paper_order_manager import PaperOrderManager
+from auraquant.risk.risk_engine import RiskEngine
+from auraquant.sentiment.providers import NewsProvider
+from auraquant.sentiment.sentiment_processor import SentimentProcessor
+from auraquant.sentiment.types import NewsItem
+from auraquant.util.ai_log.store import AiLogStore
+from auraquant.util.ai_log.realtime_uploader import make_uploader_from_env
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=REPO_ROOT / ".env")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,8 +47,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class AlternatingNewsProvider(NewsProvider):
+    """Deterministic provider to exercise sentiment logic without external API keys."""
+
+    _i: int = 0
+
+    def fetch_latest(self, symbol: str, limit: int = 5):
+        _ = limit
+        self._i += 1
+        now = datetime.utcnow()
+
+        if self._i % 2 == 0:
+            titles = [
+                f"{symbol} partnership growth bullish",
+                f"{symbol} inflows surge record upgrade",
+            ]
+        else:
+            titles = [
+                f"{symbol} lawsuit bearish outflows dump",
+                f"{symbol} exploit hack liquidation collapse",
+            ]
+
+        return [
+            NewsItem(title=t, published_at=now - timedelta(minutes=3), source="static", url=None)
+            for t in titles
+        ]
+
+
 class AutonomousOrchestratorTest:
-    """Run orchestrator autonomously for configurable duration with AI logging."""
+    """Run real orchestrator for N minutes with live ticks + AI logging."""
 
     def __init__(
         self,
@@ -61,39 +97,60 @@ class AutonomousOrchestratorTest:
         self.upload_success = 0
         self.upload_failed = 0
 
-        # Initialize AI logging
+        # AI logging (store + optional uploader)
         self.store = AiLogStore(log_file)
         self.uploader = make_uploader_from_env(queue_dir="ai_logs/.upload_queue")
-        if self.uploader:
+        if self.uploader is not None:
             self.uploader.start()
-            logger.info("[INIT] Real-time uploader started (WEEX endpoint configured)")
+            logger.info("[INIT] Real-time uploader enabled")
         else:
-            logger.warning("[INIT] WEEX_AI_LOG_UPLOAD_URL not set. Local logging only.")
+            logger.warning("[INIT] Real-time uploader disabled (WEEX_AI_LOG_UPLOAD_URL not set)")
 
-        # Symbols for mock decisions
-        self.symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
+        # Monkeypatch store.append to also push to uploader, without changing core orchestrator.
+        orig_append = self.store.append
 
-    def _log_decision(self, stage: str, model: str, input_data: dict, output: dict, 
-                      explanation: str, order_id=None):
-        """Log AI decision to store + uploader."""
-        event = {
-            "stage": stage,
-            "model": model,
-            "input": input_data,
-            "output": output,
-            "explanation": explanation,
-            "orderId": order_id,
-        }
-        # Local store
-        self.store.append(event)
-        self.ai_log_count += 1
+        def _append_and_upload(event):
+            orig_append(event)
+            self.ai_log_count += 1
+            if self.uploader is not None:
+                ok = bool(self.uploader.upload(event.to_payload()))
+                if ok:
+                    self.upload_success += 1
+                else:
+                    self.upload_failed += 1
 
-        # Real-time upload
-        if self.uploader:
-            if self.uploader.upload(event):
-                self.upload_success += 1
-            else:
-                self.upload_failed += 1
+        self.store.append = _append_and_upload  # type: ignore[method-assign]
+
+        # Build real orchestrator components
+        bot_logger = logging.getLogger("auraquant.orch_test")
+        prices = WeexRestMultiPriceProvider()
+        sentiment = SentimentProcessor(logger=bot_logger, provider=AlternatingNewsProvider())
+        correlation = CorrelationTrigger(logger=bot_logger)
+        risk = RiskEngine(logger=bot_logger)
+        execution = PaperOrderManager(starting_equity=1000.0)
+
+        # Make it possible to hit >=10 entries in 10 minutes.
+        config = OrchestratorConfig(
+            symbol="SOL/USDT",
+            tick_seconds=20,
+            min_entry_interval_seconds=20,
+            enforce_weex_allowlist=True,
+        )
+
+        correlation.window = 10
+
+        self.execution = execution
+        self.orchestrator = Orchestrator(
+            logger=bot_logger,
+            config=config,
+            sentiment=sentiment,
+            correlation=correlation,
+            risk=risk,
+            prices=prices,
+            execution=execution,
+            ai_log_store=self.store,
+            ai_log_uploader=self.uploader,
+        )
 
     def run(self):
         """Run autonomous orchestrator test."""
@@ -102,7 +159,7 @@ class AutonomousOrchestratorTest:
         logger.info(f"[START] Min trades required: {self.min_trades}")
         logger.info(f"[START] Start time: {self.start_time.isoformat()}")
 
-        tick_interval = 20  # Scan every 20 seconds for 10-12 min test
+        tick_interval = 20
 
         while True:
             self.tick_count += 1
@@ -113,76 +170,13 @@ class AutonomousOrchestratorTest:
                 break
 
             try:
-                symbol = random.choice(self.symbols)
-                price = random.uniform(20, 200)
+                now = datetime.utcnow()
+                self.orchestrator.step(now=now)
 
-                # Simulate SCAN stage
-                bias = random.choice(["LONG", "SHORT", "NEUTRAL"])
-                score = round(random.uniform(0.5, 0.95), 2)
-                logger.info(f"[TICK {self.tick_count}] SCAN: {bias} (score={score})")
-                self._log_decision(
-                    stage="SCAN",
-                    model="AuraQuant.SentimentProcessor",
-                    input_data={"symbol": symbol, "limit": 5, "price": price},
-                    output={"bias": bias, "score": score},
-                    explanation="Sentiment analysis from news sources + market data",
-                )
-
-                # Simulate QUALIFY stage
-                if bias != "NEUTRAL":
-                    decision = random.choice(["LONG", "SHORT", "SKIP"])
-                    corr = round(random.uniform(0.3, 0.9), 2)
-                    logger.info(f"[TICK {self.tick_count}] QUALIFY: {decision} (corr={corr})")
-                    self._log_decision(
-                        stage="QUALIFY",
-                        model="AuraQuant.CorrelationTrigger",
-                        input_data={"symbol": symbol, "bias": bias, "correlation_window": 30},
-                        output={"decision": decision, "correlation": corr},
-                        explanation="Correlation filter: requires corr >= threshold",
-                    )
-
-                    # Simulate ENTER stage
-                    if decision in ["LONG", "SHORT"] and random.random() < 0.4:
-                        order_id = f"order_{self.trade_count + 1000:06d}"
-                        self.trade_count += 1
-                        logger.info(f"[TICK {self.tick_count}] ENTER: APPROVED (orderId={order_id})")
-                        self._log_decision(
-                            stage="ENTER",
-                            model="AuraQuant.OrderExecutor",
-                            input_data={"symbol": symbol, "side": decision, "leverage": 10.0},
-                            output={"status": "APPROVED", "orderId": order_id},
-                            explanation="Pre-trade risk check passed; order placed",
-                            order_id=order_id,
-                        )
-                    else:
-                        logger.info(f"[TICK {self.tick_count}] ENTER: REJECTED")
-                        self._log_decision(
-                            stage="ENTER",
-                            model="AuraQuant.OrderExecutor",
-                            input_data={"symbol": symbol, "side": decision},
-                            output={"status": "REJECTED", "orderId": None},
-                            explanation="Risk check failed or random rejection",
-                        )
-                else:
-                    logger.info(f"[TICK {self.tick_count}] QUALIFY: SKIPPED (bias=NEUTRAL)")
-                    self._log_decision(
-                        stage="QUALIFY",
-                        model="AuraQuant.CorrelationTrigger",
-                        input_data={"symbol": symbol, "bias": bias},
-                        output={"decision": "SKIP"},
-                        explanation="Neutral bias: no trade intent generated",
-                    )
-
-                # Simulate RECONCILE stage
-                equity = round(1000 - random.uniform(-50, 100), 2)
-                unrealized_pnl = round(random.uniform(-100, 100), 2)
-                logger.info(f"[TICK {self.tick_count}] RECONCILE: equity={equity}, pnl={unrealized_pnl}")
-                self._log_decision(
-                    stage="RECONCILE",
-                    model="AuraQuant.RiskEngine",
-                    input_data={"positions": self.trade_count},
-                    output={"equity": equity, "unrealizedPnL": unrealized_pnl},
-                    explanation="Portfolio reconciliation + risk check",
+                # Track trades as "positions opened" (entries)
+                self.trade_count = int(self.execution.positions_opened())
+                logger.info(
+                    f"[TICK {self.tick_count}] positions_opened={self.trade_count} equity={self.execution.equity():.2f}"
                 )
 
             except Exception as e:
