@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
@@ -13,6 +14,9 @@ from ..risk.types import Side, TradeResult
 from ..weex.private_client import WeexPrivateRestClient
 from ..weex.symbols import to_weex_contract_symbol
 from .base_order_manager import BaseOrderManager
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -225,9 +229,20 @@ class WeexOrderManager(BaseOrderManager):
         if pos is None:
             return False
 
-        self._close_position_market(pos=pos)
-        # Do not force pos.is_open=False here; reconcile with exchange state is not implemented.
-        return True
+        try:
+            self._close_position_market(pos=pos)
+            return True
+        except RuntimeError as exc:
+            msg = str(exc)
+            # If exchange reports position side invalid, it usually means the position
+            # is already closed or not available to close. Clear local state to unblock.
+            if "40015" in msg and "position side invalid" in msg.lower():
+                logger.warning("[WEEX] Close rejected (position side invalid). Clearing local position.")
+                pos.is_open = False
+                self._position = None
+                self._trades_closed += 1
+                return False
+            raise
 
     def reconcile(self, now: Optional[datetime] = None) -> None:
         _ = now

@@ -259,7 +259,12 @@ def make_uploader_from_env(queue_dir: str | Path = "ai_logs/.upload_queue") -> O
     """
     upload_url = os.getenv("WEEX_AI_LOG_UPLOAD_URL")
     if not upload_url:
-        logger.warning("[AI Log Uploader] WEEX_AI_LOG_UPLOAD_URL not set. Uploader disabled.")
+        # Missing URL is common in local testing; keep it informational unless explicitly required.
+        optional = os.getenv("WEEX_AI_LOG_UPLOAD_OPTIONAL", "1")
+        if optional == "1":
+            logger.info("[AI Log Uploader] WEEX_AI_LOG_UPLOAD_URL not set. Uploader disabled.")
+        else:
+            logger.warning("[AI Log Uploader] WEEX_AI_LOG_UPLOAD_URL not set. Uploader disabled.")
         return None
 
     headers: Dict[str, str] = {}

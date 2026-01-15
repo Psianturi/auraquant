@@ -176,7 +176,7 @@ class AutonomousOrchestratorTest:
             self.uploader.start()
             logger.info("[INIT] Real-time uploader enabled")
         else:
-            logger.warning("[INIT] Real-time uploader disabled (WEEX_AI_LOG_UPLOAD_URL not set)")
+            logger.info("[INIT] Real-time uploader disabled (WEEX_AI_LOG_UPLOAD_URL not set)")
 
         # Monkeypatch store.append to also push to uploader, without changing core orchestrator.
         orig_append = self.store.append
