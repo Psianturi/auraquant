@@ -232,14 +232,16 @@ class AutonomousOrchestratorTest:
         # Lower correlation threshold → more trades approved (default 0.25 → 0.15)
         correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.15"))
         risk = RiskEngine(logger=bot_logger)
-  
+        
+        # Cooldown after consecutive losses: 5 min for testing, 45 min for production
+        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "5"))
 
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "1.75"))
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "3.0"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "1.6"))
+
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "5.0"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
-        # Make it possible to hit >=10 entries in 10 minutes.
         config = OrchestratorConfig(
             symbol=self.symbols[0],
             tick_seconds=20,
