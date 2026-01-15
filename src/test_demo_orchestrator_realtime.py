@@ -58,9 +58,10 @@ class PriceMomentumNewsProvider(NewsProvider):
         ret = 0.0
         if len(recent) >= 2 and recent[0] > 0:
             ret = (recent[-1] - recent[0]) / max(recent[0], 1e-12)
-            if ret > 0.0015:
+            # Lowered from 0.15% to 0.08% for more signals during flat markets
+            if ret > 0.0008:
                 bias = "bullish"
-            elif ret < -0.0015:
+            elif ret < -0.0008:
                 bias = "bearish"
         titles = [
             f"{symbol} momentum {bias} (ret={ret:+.4%})",
@@ -227,10 +228,12 @@ class AutonomousOrchestratorTest:
         else:
             sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
+        # Lower correlation threshold → more trades approved (default 0.25 → 0.15)
+        correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.15"))
         risk = RiskEngine(logger=bot_logger)
   
 
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "1.5"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "1.75"))
         risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "3.0"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
