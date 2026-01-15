@@ -229,20 +229,20 @@ class AutonomousOrchestratorTest:
         else:
             sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
-        # Lower correlation threshold → more trades approved (default 0.25 → 0.15)
-        correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.15"))
+        # Lower correlation threshold → more trades approved (default 0.25 → 0.10)
+        correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.10"))
         risk = RiskEngine(logger=bot_logger)
         
         risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "1"))
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "4.0"))  # Wider SL to avoid quick stops
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "8.0"))  # Target $1-3 profit per trade
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "5.0"))  # Wider SL to avoid quick stops
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "9.5"))  
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
         config = OrchestratorConfig(
             symbol=self.symbols[0],
             tick_seconds=20,
-            min_entry_interval_seconds=20,
+            min_entry_interval_seconds=int(os.getenv("MIN_ENTRY_INTERVAL_SECONDS", "10")),
             enforce_weex_allowlist=True,
         )
 
@@ -346,6 +346,23 @@ class AutonomousOrchestratorTest:
                 # Pre-warm history for ALL symbols each tick so correlation can work.
                 warm_symbols = list(dict.fromkeys([self.correlation.lead_symbol, *self.symbols]))
                 self.prices.get_tick(warm_symbols, now=now)
+
+                pos = self.execution.position()
+                max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "180"))
+                if pos is not None and max_hold_seconds > 0:
+                    held_for = (now - pos.opened_at).total_seconds()
+                    if held_for >= max_hold_seconds:
+                        if hasattr(self.execution, "close_open_position_best_effort"):
+                            logger.warning(
+                                f"[MANAGE] Max hold exceeded ({held_for:.0f}s >= {max_hold_seconds}s). "
+                                "Attempting best-effort close."
+                            )
+                            try:
+                                self.execution.close_open_position_best_effort()
+                            except Exception as exc:
+                                logger.warning(f"[MANAGE] Max-hold close failed: {exc}")
+                        else:
+                            logger.warning("[MANAGE] Max hold exceeded but execution has no close method.")
 
                 active_symbol = self._pick_active_symbol()
                 self.orchestrator.config.symbol = active_symbol
