@@ -108,10 +108,18 @@ class Orchestrator:
                         )
 
             if self.ai_log_store is not None:
+                order_id_int = None
+                if trade_closed.order_id is not None:
+                    s = str(trade_closed.order_id).strip()
+                    if s.isdigit():
+                        try:
+                            order_id_int = int(s)
+                        except Exception:
+                            order_id_int = None
                 self.ai_log_store.append(
                     AiLogEvent(
                         stage="TRADE_CLOSED",
-                        model="AuraQuant.PaperOrderManager",
+                        model=f"AuraQuant.{type(self.execution).__name__}",
                         input={
                             "symbol": trade_closed.symbol,
                             "pnl_usdt": round(trade_closed.pnl_usdt, 6),
@@ -120,8 +128,8 @@ class Orchestrator:
                             "equity_now": round(self.execution.equity(), 6),
                             "trade_count": self.execution.trade_count(),
                         },
-                        explanation="Paper position closed by SL/TP; realized PnL applied to equity.",
-                        order_id=int(trade_closed.order_id.split("_")[1]) if trade_closed.order_id and trade_closed.order_id.startswith("paper_") else None,
+                        explanation="Position closed (SL/TP). Realized PnL applied to equity.",
+                        order_id=order_id_int,
                         timestamp=now,
                     )
                 )
@@ -388,7 +396,7 @@ class Orchestrator:
             self.ai_log_store.append(
                 AiLogEvent(
                     stage="EXECUTION",
-                    model="AuraQuant.PaperOrderManager",
+                    model=f"AuraQuant.{type(self.execution).__name__}",
                     input={
                         "symbol": tick.symbol,
                         "side": decision.side,
@@ -398,7 +406,7 @@ class Orchestrator:
                         "notional_usdt": decision.position_notional_usdt,
                     },
                     output={"opened": True},
-                    explanation="Deterministic paper execution (no exchange interaction).",
+                    explanation="Execution layer opened a position.",
                     timestamp=tick.now,
                 )
             )

@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
-"""Autonomous Orchestrator Real-Time Test.
 
-Runs the real AuraQuant state-machine orchestrator for a fixed duration.
-The bot decides autonomously whether to trade or skip.
-
-Usage:
-    python src/test_demo_orchestrator_realtime.py --duration 600 --min-trades 10
-
-Environment:
-    WEEX_AI_LOG_UPLOAD_URL (optional; enables real-time upload)
-    WEEX_API_KEY, WEEX_SECRET_KEY, WEEX_PASSPHRASE (only if upload enabled)
-"""
 
 import argparse
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -30,13 +20,16 @@ from auraquant.core.orchestrator import Orchestrator
 from auraquant.core.types import OrchestratorConfig
 from auraquant.correlation.correlation_trigger import CorrelationTrigger
 from auraquant.data.weex_rest_price_provider import WeexRestMultiPriceProvider
-from auraquant.execution.paper_order_manager import PaperOrderManager
+from auraquant.execution.weex_order_manager import WeexOrderManager
 from auraquant.risk.risk_engine import RiskEngine
-from auraquant.sentiment.providers import NewsProvider
+from auraquant.sentiment.providers import CryptoPanicProvider, NewsProvider
 from auraquant.sentiment.sentiment_processor import SentimentProcessor
 from auraquant.sentiment.types import NewsItem
 from auraquant.util.ai_log.store import AiLogStore
 from auraquant.util.ai_log.realtime_uploader import make_uploader_from_env
+
+from auraquant.weex.private_client import WeexPrivateRestClient
+from auraquant.weex.symbols import to_weex_contract_symbol
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,30 +43,32 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AlternatingNewsProvider(NewsProvider):
+class PriceMomentumNewsProvider(NewsProvider):
 
-    _i: int = 0
+    prices: WeexRestMultiPriceProvider
 
     def fetch_latest(self, symbol: str, limit: int = 5):
-        _ = limit
-        self._i += 1
+
+        internal = f"{symbol}/USDT"
         now = datetime.utcnow()
-
-        if self._i % 2 == 0:
-            titles = [
-                f"{symbol} partnership growth bullish",
-                f"{symbol} inflows surge record upgrade",
-            ]
-        else:
-            titles = [
-                f"{symbol} lawsuit bearish outflows dump",
-                f"{symbol} exploit hack liquidation collapse",
-            ]
-
-        return [
-            NewsItem(title=t, published_at=now - timedelta(minutes=3), source="static", url=None)
+        recent = self.prices.get_recent_prices(internal, window=12)
+        bias = "flat"
+        ret = 0.0
+        if len(recent) >= 2 and recent[0] > 0:
+            ret = (recent[-1] - recent[0]) / max(recent[0], 1e-12)
+            if ret > 0.0015:
+                bias = "bullish"
+            elif ret < -0.0015:
+                bias = "bearish"
+        titles = [
+            f"{symbol} momentum {bias} (ret={ret:+.4%})",
+            f"{symbol} volatility check based on recent ticks",
+        ]
+        items = [
+            NewsItem(title=t, published_at=now - timedelta(seconds=30), source="weex_ticker", url=None)
             for t in titles
         ]
+        return items[:limit]
 
 
 class AutonomousOrchestratorTest:
@@ -81,15 +76,16 @@ class AutonomousOrchestratorTest:
 
     def __init__(
         self,
+        symbol: str = "BTC/USDT",
         duration_seconds: int = 600,
         min_trades: int = 10,
         log_file: str = "ai_logs/test_demo_orchestrator_realtime.ndjson",
     ):
+        self.symbol = symbol
         self.duration_seconds = duration_seconds
         self.min_trades = min_trades
         self.log_file = log_file
 
-        # Stats
         self.start_time = None
         self.end_time = None
         self.tick_count = 0
@@ -98,7 +94,6 @@ class AutonomousOrchestratorTest:
         self.upload_success = 0
         self.upload_failed = 0
 
-        # AI logging (store + optional uploader)
         self.store = AiLogStore(log_file)
         self.uploader = make_uploader_from_env(queue_dir="ai_logs/.upload_queue")
         if self.uploader is not None:
@@ -125,19 +120,30 @@ class AutonomousOrchestratorTest:
         # Build real orchestrator components
         bot_logger = logging.getLogger("auraquant.orch_test")
         prices = WeexRestMultiPriceProvider()
-        sentiment = SentimentProcessor(logger=bot_logger, provider=AlternatingNewsProvider())
-        # For this live test we want the bot to "think" every tick; disable TTL caching.
+
+        # Prefer real news if CRYPTOPANIC_API_TOKEN is set; else fall back to real-price momentum.
+        provider: NewsProvider
+        if os.getenv("CRYPTOPANIC_API_TOKEN"):
+            try:
+                provider = CryptoPanicProvider()
+            except Exception:
+                provider = PriceMomentumNewsProvider(prices=prices)
+        else:
+            provider = PriceMomentumNewsProvider(prices=prices)
+
+        sentiment = SentimentProcessor(logger=bot_logger, provider=provider)
         sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
         risk = RiskEngine(logger=bot_logger)
   
         risk.sl_atr_mult = 0.75
         risk.tp_atr_mult = 1.25
-        execution = PaperOrderManager(starting_equity=1000.0)
+        client = WeexPrivateRestClient()
+        execution = WeexOrderManager(client=client)
 
         # Make it possible to hit >=10 entries in 10 minutes.
         config = OrchestratorConfig(
-            symbol="SOL/USDT",
+            symbol=self.symbol,
             tick_seconds=20,
             min_entry_interval_seconds=20,
             enforce_weex_allowlist=True,
@@ -158,6 +164,38 @@ class AutonomousOrchestratorTest:
             ai_log_uploader=self.uploader,
         )
 
+        # Official guide connectivity checks (no secrets printed)
+        self._weex_connectivity_checks(symbol=config.symbol)
+
+    def _weex_connectivity_checks(self, symbol: str) -> None:
+        weex_symbol = to_weex_contract_symbol(symbol)
+        logger.info("[WEEX] Connectivity checks per official guide")
+        logger.info(f"[WEEX] Target symbol: {symbol} -> {weex_symbol}")
+
+        # 1) Public ticker
+        try:
+            prices = WeexRestMultiPriceProvider()
+            tick = prices.get_tick([symbol], now=datetime.utcnow())
+            last, _atr = tick.get(symbol, (0.0, 0.0))
+            logger.info(f"[WEEX] Market ticker OK (last={last})")
+        except Exception as e:
+            raise RuntimeError(f"WEEX public ticker failed: {e}")
+
+        # 2) Private assets
+        try:
+            self.execution.reconcile(now=datetime.utcnow())
+            logger.info(f"[WEEX] Account assets OK (equity={self.execution.equity():.4f} USDT)")
+        except Exception as e:
+            raise RuntimeError(f"WEEX account assets failed: {e}")
+
+        # 3) Set leverage
+        try:
+            if hasattr(self.execution, "set_leverage"):
+                self.execution.set_leverage(symbol=symbol, leverage=int(os.getenv("WEEX_LEVERAGE", "2")))
+            logger.info("[WEEX] Set leverage OK")
+        except Exception as e:
+            raise RuntimeError(f"WEEX set leverage failed: {e}")
+
     def run(self):
         """Run autonomous orchestrator test."""
         self.start_time = datetime.now(timezone.utc)
@@ -165,7 +203,7 @@ class AutonomousOrchestratorTest:
         logger.info(f"[START] Min trades required: {self.min_trades}")
         logger.info(f"[START] Start time: {self.start_time.isoformat()}")
 
-        tick_interval = 20
+        tick_interval = int(getattr(self.orchestrator.config, "tick_seconds", 20) or 20)
 
         while True:
             self.tick_count += 1
@@ -228,6 +266,16 @@ class AutonomousOrchestratorTest:
 
     def cleanup(self):
         """Graceful shutdown."""
+        try:
+            pos = self.execution.position() if hasattr(self, "execution") else None
+            if pos is not None:
+                logger.warning("[CLEANUP] Detected an open position; attempting best-effort close")
+                closer = getattr(self.execution, "close_open_position_best_effort", None)
+                if callable(closer):
+                    closer()
+        except Exception:
+            logger.exception("[CLEANUP] Failed to close open position (continuing shutdown)")
+
         if self.uploader:
             logger.info("[CLEANUP] Stopping uploader (flushing queued events)...")
             self.uploader.stop()
@@ -241,8 +289,14 @@ def main():
     parser.add_argument(
         "--duration",
         type=int,
-        default=600,
-        help="Duration in seconds (default: 600 = 10 min)",
+        default=360,
+        help="Duration in seconds (default: 360 = 6 min)",
+    )
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        default=os.getenv("WEEX_SYMBOL", "BTC/USDT"),
+        help="Trading symbol (default: BTC/USDT). Also supports env WEEX_SYMBOL.",
     )
     parser.add_argument(
         "--min-trades",
@@ -258,11 +312,16 @@ def main():
     )
     args = parser.parse_args()
 
-    test = AutonomousOrchestratorTest(
-        duration_seconds=args.duration,
-        min_trades=args.min_trades,
-        log_file=args.log_file,
-    )
+    try:
+        test = AutonomousOrchestratorTest(
+            symbol=args.symbol,
+            duration_seconds=args.duration,
+            min_trades=args.min_trades,
+            log_file=args.log_file,
+        )
+    except Exception as e:
+        logger.error("[FATAL] Init failed. ", exc_info=True)
+        raise SystemExit(1) from e
 
     try:
         test.run()
