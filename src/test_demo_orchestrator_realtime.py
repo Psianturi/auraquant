@@ -22,6 +22,7 @@ from auraquant.correlation.correlation_trigger import CorrelationTrigger
 from auraquant.data.multi_price_provider import MultiPriceProvider
 from auraquant.data.weex_rest_price_provider import WeexRestMultiPriceProvider
 from auraquant.execution.weex_order_manager import WeexOrderManager
+from auraquant.learning import TradePolicyLearner
 from auraquant.risk.risk_engine import RiskEngine
 from auraquant.sentiment.providers import CryptoPanicProvider, NewsProvider
 from auraquant.sentiment.sentiment_processor import SentimentProcessor
@@ -258,6 +259,12 @@ class AutonomousOrchestratorTest:
 
         self.execution = execution
         self.correlation = correlation
+        learner = None
+        if os.getenv("ENABLE_LEARNER", "0") == "1":
+            model_path = os.getenv("LEARNER_MODEL_PATH", "models/trade_policy.json")
+            learner = TradePolicyLearner(model_path=model_path)
+            logger.info(f"[INIT] Online learner enabled (model={model_path})")
+
         self.orchestrator = Orchestrator(
             logger=bot_logger,
             config=config,
@@ -266,6 +273,7 @@ class AutonomousOrchestratorTest:
             risk=risk,
             prices=prices,
             execution=execution,
+            learner=learner,
             ai_log_store=self.store,
             ai_log_uploader=self.uploader,
         )
