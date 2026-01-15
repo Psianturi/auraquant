@@ -58,8 +58,8 @@ class PriceMomentumNewsProvider(NewsProvider):
         ret = 0.0
         if len(recent) >= 2 and recent[0] > 0:
             ret = (recent[-1] - recent[0]) / max(recent[0], 1e-12)
-            # Lowered to 0.04% for more signals during very flat markets
-            threshold = float(os.getenv("MOMENTUM_THRESHOLD", "0.0004"))
+            # Aggressive: 0.03% threshold for more trade signals
+            threshold = float(os.getenv("MOMENTUM_THRESHOLD", "0.0003"))
             if ret > threshold:
                 bias = "bullish"
             elif ret < -threshold:
@@ -233,12 +233,9 @@ class AutonomousOrchestratorTest:
         correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.15"))
         risk = RiskEngine(logger=bot_logger)
         
-        # Cooldown after consecutive losses: 5 min for testing, 45 min for production
-        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "4"))
-
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "3.0"))
-
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "6.0"))
+        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "1"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "4.0"))  # Wider SL to avoid quick stops
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "8.0"))  # Target $1-3 profit per trade
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
