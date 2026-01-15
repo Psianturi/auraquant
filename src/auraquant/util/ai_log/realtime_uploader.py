@@ -203,7 +203,10 @@ class RealTimeAiLogUploader:
             headers=hdrs,
             timeout=self.upload_timeout_seconds,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"WEEX AI log upload failed HTTP {resp.status_code}: {resp.text[:200]}"
+            )
         self.logger.debug(f"[AI Log Uploader] Uploaded 1 event to {self.weex_upload_url}")
         return True
 
