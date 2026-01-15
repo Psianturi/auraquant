@@ -17,7 +17,7 @@ if str(SRC_DIR) not in sys.path:
 from dotenv import load_dotenv
 
 from auraquant.core.orchestrator import Orchestrator
-from auraquant.core.types import OrchestratorConfig
+from auraquant.core.types import BotPhase, OrchestratorConfig
 from auraquant.correlation.correlation_trigger import CorrelationTrigger
 from auraquant.data.multi_price_provider import MultiPriceProvider
 from auraquant.data.weex_rest_price_provider import WeexRestMultiPriceProvider
@@ -154,6 +154,8 @@ class AutonomousOrchestratorTest:
             raise ValueError("symbols list cannot be empty")
 
         self.symbols = normalized
+        self._scan_index = 0
+        self._active_symbol = self.symbols[0]
         self.duration_seconds = duration_seconds
         self.min_trades = min_trades
         self.log_file = log_file
@@ -298,10 +300,24 @@ class AutonomousOrchestratorTest:
             raise RuntimeError(f"WEEX set leverage failed: {e}")
 
     def _pick_active_symbol(self) -> str:
+        # IMPORTANT:
+        # Orchestrator is a multi-phase state machine (SCAN -> QUALIFY -> ENTER -> RECONCILE ...).
+        # If we rotate the symbol every tick, we end up doing SCAN on symbol A and then
+        # QUALIFY/ENTER on symbol B (because phase advances on each step call).
+        # That makes entries extremely unlikely.
+        #
+        # Fix: only rotate symbols when we're in SCAN *and* flat. Otherwise keep the
+        # last chosen active symbol stable until we return to SCAN again.
         pos = self.execution.position()
         if pos is not None and getattr(pos, "symbol", None):
-            return str(pos.symbol)
-        return self.symbols[(self.tick_count - 1) % len(self.symbols)]
+            self._active_symbol = str(pos.symbol)
+            return self._active_symbol
+
+        if getattr(self.orchestrator, "phase", None) == BotPhase.SCAN:
+            self._active_symbol = self.symbols[self._scan_index % len(self.symbols)]
+            self._scan_index += 1
+
+        return self._active_symbol
 
     def run(self):
         """Run autonomous orchestrator test."""
