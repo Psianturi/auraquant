@@ -13,6 +13,9 @@ Queue persistence:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -106,23 +109,21 @@ class RealTimeAiLogUploader:
         retry_delay_seconds: float = 5.0,
         upload_timeout_seconds: float = 15.0,
         flush_interval_seconds: float = 30.0,
+        weex_api_key: Optional[str] = None,
+        weex_secret_key: Optional[str] = None,
+        weex_passphrase: Optional[str] = None,
     ):
-        """
-        Args:
-            weex_upload_url: WEEX uploadAiLog endpoint (e.g., https://api.weex.com/.../uploadAiLog)
-            headers: Auth headers (e.g., {"Authorization": "Bearer ..."})
-            queue_dir: Directory to persist failed uploads
-            max_retries: Max retry attempts per event
-            retry_delay_seconds: Delay before retrying failed upload
-            upload_timeout_seconds: HTTP request timeout
-            flush_interval_seconds: Background thread flushes queued events every N seconds
-        """
+       
         self.weex_upload_url = weex_upload_url
         self.headers = headers or {}
         self.max_retries = max_retries
         self.retry_delay_seconds = retry_delay_seconds
         self.upload_timeout_seconds = upload_timeout_seconds
         self.flush_interval_seconds = flush_interval_seconds
+        self.weex_api_key = weex_api_key
+        self.weex_secret_key = weex_secret_key
+        self.weex_passphrase = weex_passphrase
+        self.logger = logger
 
         self.queue = DiskQueue(queue_dir)
         self._background_thread: Optional[threading.Thread] = None
@@ -174,19 +175,36 @@ class RealTimeAiLogUploader:
 
     def _upload_sync(self, event_payload: Dict[str, Any]) -> bool:
         """Synchronous upload attempt. Raises on error."""
+
+        payload = [event_payload]
+        body_str = json.dumps(payload)
+        
         hdrs = {"Content-Type": "application/json"}
         hdrs.update(self.headers)
+        
+        if self.weex_api_key and self.weex_secret_key and self.weex_passphrase:
+            timestamp = str(int(time.time() * 1000))
+            message = timestamp + "POST" + "/capi/v2/order/uploadAiLog" + "" + body_str
+            signature = hmac.new(
+                self.weex_secret_key.encode(),
+                message.encode(),
+                hashlib.sha256
+            ).digest()
+            signature_b64 = base64.b64encode(signature).decode()
+            
+            hdrs["ACCESS-KEY"] = self.weex_api_key
+            hdrs["ACCESS-SIGN"] = signature_b64
+            hdrs["ACCESS-TIMESTAMP"] = timestamp
+            hdrs["ACCESS-PASSPHRASE"] = self.weex_passphrase
 
-        # WEEX expects list of events
-        payload = [event_payload]
         resp = requests.post(
             self.weex_upload_url,
-            json=payload,
+            data=body_str,
             headers=hdrs,
             timeout=self.upload_timeout_seconds,
         )
         resp.raise_for_status()
-        logger.debug(f"[AI Log Uploader] Uploaded 1 event to {self.weex_upload_url}")
+        self.logger.debug(f"[AI Log Uploader] Uploaded 1 event to {self.weex_upload_url}")
         return True
 
     def _flush_loop(self) -> None:
@@ -234,6 +252,9 @@ def make_uploader_from_env(queue_dir: str | Path = "ai_logs/.upload_queue") -> O
 
     Expected env vars:
     - WEEX_AI_LOG_UPLOAD_URL (required)
+    - WEEX_API_KEY (optional, for HMAC auth)
+    - WEEX_SECRET_KEY (optional, for HMAC auth)
+    - WEEX_PASSPHRASE (optional, for HMAC auth)
     - WEEX_AI_LOG_AUTH_HEADER (optional, e.g., "Authorization:Bearer XXX")
     """
     upload_url = os.getenv("WEEX_AI_LOG_UPLOAD_URL")
@@ -249,8 +270,15 @@ def make_uploader_from_env(queue_dir: str | Path = "ai_logs/.upload_queue") -> O
             k, v = auth.split(":", 1)
             headers[k.strip()] = v.strip()
 
+    weex_api_key = os.getenv("WEEX_API_KEY")
+    weex_secret_key = os.getenv("WEEX_SECRET_KEY")
+    weex_passphrase = os.getenv("WEEX_PASSPHRASE")
+
     return RealTimeAiLogUploader(
         weex_upload_url=upload_url,
         headers=headers,
         queue_dir=queue_dir,
+        weex_api_key=weex_api_key,
+        weex_secret_key=weex_secret_key,
+        weex_passphrase=weex_passphrase,
     )
