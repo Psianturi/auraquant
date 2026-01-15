@@ -29,6 +29,7 @@ class StaticNewsProvider:
 class CryptoPanicProvider:
 
     api_token: Optional[str] = None
+    base_url: Optional[str] = None
     session: Optional[object] = None
 
     def __post_init__(self) -> None:
@@ -41,6 +42,10 @@ class CryptoPanicProvider:
 
         if self.api_token is None:
             self.api_token = os.getenv("CRYPTOPANIC_API_TOKEN")
+        if self.base_url is None:
+            # Per CryptoPanic docs (and WEEX participant setups), the base endpoint is typically:
+            # https://cryptopanic.com/api/developer/v2
+            self.base_url = os.getenv("CRYPTOPANIC_BASE_URL", "https://cryptopanic.com/api/developer/v2")
         if self.session is None:
             self.session = _requests.Session()
 
@@ -51,8 +56,8 @@ class CryptoPanicProvider:
         # Import lazily so StaticNewsProvider does not require requests.
         import requests
 
-        # CryptoPanic API docs vary; this is a pragmatic baseline.
-        url = "https://cryptopanic.com/api/v1/posts/"
+        base = (self.base_url or "https://cryptopanic.com/api/developer/v2").rstrip("/")
+        url = f"{base}/posts/"
         params = {
             "auth_token": self.api_token,
             "currencies": symbol.split("/")[0],
