@@ -58,10 +58,11 @@ class PriceMomentumNewsProvider(NewsProvider):
         ret = 0.0
         if len(recent) >= 2 and recent[0] > 0:
             ret = (recent[-1] - recent[0]) / max(recent[0], 1e-12)
-            # Lowered from 0.15% to 0.08% for more signals during flat markets
-            if ret > 0.0008:
+            # Lowered to 0.04% for more signals during very flat markets
+            threshold = float(os.getenv("MOMENTUM_THRESHOLD", "0.0004"))
+            if ret > threshold:
                 bias = "bullish"
-            elif ret < -0.0008:
+            elif ret < -threshold:
                 bias = "bearish"
         titles = [
             f"{symbol} momentum {bias} (ret={ret:+.4%})",
