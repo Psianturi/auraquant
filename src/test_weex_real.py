@@ -26,9 +26,17 @@ import base64
 import json
 import math
 import requests
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Add src to path for imports
+SRC_DIR = Path(__file__).resolve().parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from auraquant.util.ai_log import AiLogStore, AiLogEvent, make_uploader_from_env
 
 
 class _Tee:
@@ -83,6 +91,10 @@ _ARGS = _parse_args()
 TRADE_REPEAT = max(int(_ARGS.repeat or 1), 1)
 TRADE_SLEEP_SECONDS = float(_ARGS.sleep or 0.0)
 
+# Initialize AI log store and uploader
+ai_log_store = AiLogStore("ai_logs/test_weex_real.ndjson")
+ai_log_uploader = make_uploader_from_env(queue_dir="ai_logs/.upload_queue")
+
 _LOG_FH = None
 if _ARGS.log_file:
     log_path = os.path.abspath(_ARGS.log_file)
@@ -109,6 +121,11 @@ if _ARGS.log_file:
     sys.stdout = _Tee(sys.stdout, _LOG_FH)
     sys.stderr = _Tee(sys.stderr, _LOG_FH)
     print(f"[LOG] Writing console output to: {log_path}")
+
+# Start real-time AI log uploader if configured
+if ai_log_uploader:
+    ai_log_uploader.start()
+    print("[INFO] Real-time AI log uploader started")
 
 BASE_URL = os.getenv("WEEX_BASE_URL", "https://api-contract.weex.com").rstrip("/")
 
@@ -527,10 +544,69 @@ else:
                         order_ids.append(str(order_id))
                     print("[OK] Order placed")
                     print(f"Response: {json.dumps(data, indent=2)}")
+                    
+                    event = AiLogEvent(
+                        stage="ENTER",
+                        model="TestWeexReal.OrderPlacement",
+                        input={
+                            "symbol": PRODUCT_SYMBOL,
+                            "size": float(order_size),
+                            "price": float(order_price),
+                            "notional": notional_est,
+                        },
+                        output={
+                            "status": "approved",
+                            "order_id": str(order_id),
+                        },
+                        explanation=f"Test order {i+1}/{TRADE_REPEAT} placed successfully on {PRODUCT_SYMBOL}",
+                        order_id=str(order_id),
+                    )
+                    ai_log_store.append(event)
+                    if ai_log_uploader:
+                        ai_log_uploader.upload(event.to_dict())
+                    print(f"[AI LOG] Order decision logged")
                 else:
                     print(f"[FAILED] {resp.text}")
+                    # Log rejection
+                    event = AiLogEvent(
+                        stage="ENTER",
+                        model="TestWeexReal.OrderPlacement",
+                        input={
+                            "symbol": PRODUCT_SYMBOL,
+                            "size": float(order_size),
+                            "price": float(order_price),
+                        },
+                        output={
+                            "status": "rejected",
+                            "error": resp.text[:200],
+                        },
+                        explanation=f"Order placement failed with HTTP {resp.status_code}",
+                        order_id=None,
+                    )
+                    ai_log_store.append(event)
+                    if ai_log_uploader:
+                        ai_log_uploader.upload(event.to_dict())
             except Exception as e:
                 print(f"[ERROR] {e}")
+                # Log error
+                event = AiLogEvent(
+                    stage="ENTER",
+                    model="TestWeexReal.OrderPlacement",
+                    input={
+                        "symbol": PRODUCT_SYMBOL,
+                        "size": float(order_size),
+                        "price": float(order_price),
+                    },
+                    output={
+                        "status": "error",
+                        "error": str(e)[:200],
+                    },
+                    explanation=f"Order placement raised exception: {str(e)[:100]}",
+                    order_id=None,
+                )
+                ai_log_store.append(event)
+                if ai_log_uploader:
+                    ai_log_uploader.upload(event.to_dict())
 
         if i < TRADE_REPEAT - 1 and TRADE_SLEEP_SECONDS > 0:
             time.sleep(TRADE_SLEEP_SECONDS)
@@ -607,3 +683,10 @@ print("If you see Error 521:")
 print("  - Your VPS public IP must be whitelisted by WEEX admin")
 print("  - Contact: https://t.me/weexaiwars")
 print("=" * 70)
+
+# Stop real-time uploader and flush remaining events
+if ai_log_uploader:
+    print("[INFO] Shutting down AI log uploader...")
+    ai_log_uploader.stop(timeout_seconds=10)
+    print("[INFO] AI log uploader stopped")
+
