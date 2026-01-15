@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from auraquant.core.orchestrator import Orchestrator
 from auraquant.core.types import OrchestratorConfig
 from auraquant.correlation.correlation_trigger import CorrelationTrigger
+from auraquant.data.multi_price_provider import MultiPriceProvider
 from auraquant.data.weex_rest_price_provider import WeexRestMultiPriceProvider
 from auraquant.execution.weex_order_manager import WeexOrderManager
 from auraquant.risk.risk_engine import RiskEngine
@@ -45,11 +46,12 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PriceMomentumNewsProvider(NewsProvider):
 
-    prices: WeexRestMultiPriceProvider
+    prices: MultiPriceProvider
 
     def fetch_latest(self, symbol: str, limit: int = 5):
 
-        internal = f"{symbol}/USDT"
+        # `symbol` is expected to be the internal pair format (e.g. "BTC/USDT").
+        internal = symbol if "/" in symbol else f"{symbol}/USDT"
         now = datetime.utcnow()
         recent = self.prices.get_recent_prices(internal, window=12)
         bias = "flat"
@@ -71,17 +73,72 @@ class PriceMomentumNewsProvider(NewsProvider):
         return items[:limit]
 
 
+class CachedTickPriceProvider:
+    """Wraps a MultiPriceProvider and caches per-symbol ticks briefly.
+
+    This prevents duplicate REST calls when we pre-warm multiple symbols and
+    then the orchestrator immediately fetches the active symbol again.
+    """
+
+    def __init__(self, inner: WeexRestMultiPriceProvider, ttl_seconds: float = 2.0) -> None:
+        self._inner = inner
+        self._ttl = float(ttl_seconds)
+        self._cache: dict[str, tuple[datetime, tuple[float, float]]] = {}
+
+    def get_tick(self, symbols: list[str], now: datetime) -> dict[str, tuple[float, float]]:
+        out: dict[str, tuple[float, float]] = {}
+        to_fetch: list[str] = []
+
+        for sym in symbols:
+            cached = self._cache.get(sym)
+            if cached is None:
+                to_fetch.append(sym)
+                continue
+            ts, val = cached
+            if (now - ts).total_seconds() <= self._ttl:
+                out[sym] = val
+            else:
+                to_fetch.append(sym)
+
+        if to_fetch:
+            fresh = self._inner.get_tick(to_fetch, now=now)
+            for sym, val in fresh.items():
+                self._cache[sym] = (now, val)
+                out[sym] = val
+
+        return out
+
+    def get_recent_prices(self, symbol: str, window: int) -> list[float]:
+        return self._inner.get_recent_prices(symbol, window)
+
+
 class AutonomousOrchestratorTest:
     """Run real orchestrator for N minutes with live ticks + AI logging."""
 
     def __init__(
         self,
-        symbol: str = "BTC/USDT",
-        duration_seconds: int = 600,
-        min_trades: int = 10,
+        symbols: list[str],
+        duration_seconds: int = 900,
+        min_trades: int = 6,
         log_file: str = "ai_logs/test_demo_orchestrator_realtime.ndjson",
     ):
-        self.symbol = symbol
+        if not symbols:
+            raise ValueError("symbols list cannot be empty")
+
+        # Normalize, dedupe, and keep stable order.
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for s in symbols:
+            s = str(s).strip()
+            if not s:
+                continue
+            if s not in seen:
+                seen.add(s)
+                normalized.append(s)
+        if not normalized:
+            raise ValueError("symbols list cannot be empty")
+
+        self.symbols = normalized
         self.duration_seconds = duration_seconds
         self.min_trades = min_trades
         self.log_file = log_file
@@ -117,9 +174,9 @@ class AutonomousOrchestratorTest:
 
         self.store.append = _append_and_upload  # type: ignore[method-assign]
 
-        # Build real orchestrator components
         bot_logger = logging.getLogger("auraquant.orch_test")
-        prices = WeexRestMultiPriceProvider()
+        prices = CachedTickPriceProvider(WeexRestMultiPriceProvider())
+        self.prices = prices
 
         # Prefer real news if CRYPTOPANIC_API_TOKEN is set; else fall back to real-price momentum.
         provider: NewsProvider
@@ -132,6 +189,15 @@ class AutonomousOrchestratorTest:
             provider = PriceMomentumNewsProvider(prices=prices)
 
         sentiment = SentimentProcessor(logger=bot_logger, provider=provider)
+      
+        try:
+            sentiment.long_threshold = float(os.getenv("SENTIMENT_LONG_THRESHOLD", "0.05"))
+        except Exception:
+            sentiment.long_threshold = 0.05
+        try:
+            sentiment.short_threshold = float(os.getenv("SENTIMENT_SHORT_THRESHOLD", "-0.05"))
+        except Exception:
+            sentiment.short_threshold = -0.05
         sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
         risk = RiskEngine(logger=bot_logger)
@@ -143,15 +209,24 @@ class AutonomousOrchestratorTest:
 
         # Make it possible to hit >=10 entries in 10 minutes.
         config = OrchestratorConfig(
-            symbol=self.symbol,
+            symbol=self.symbols[0],
             tick_seconds=20,
             min_entry_interval_seconds=20,
             enforce_weex_allowlist=True,
         )
 
+        # Match short-run testing needs; can be overridden via env.
+        try:
+            config.min_confidence = float(os.getenv("MIN_CONFIDENCE", "0.05"))
+        except Exception:
+            config.min_confidence = 0.05
+
         correlation.window = 10
+        # Ensure we always keep BTC history available (correlation lead).
+        correlation.lead_symbol = os.getenv("CORR_LEAD_SYMBOL", correlation.lead_symbol)
 
         self.execution = execution
+        self.correlation = correlation
         self.orchestrator = Orchestrator(
             logger=bot_logger,
             config=config,
@@ -165,19 +240,20 @@ class AutonomousOrchestratorTest:
         )
 
         # Official guide connectivity checks (no secrets printed)
-        self._weex_connectivity_checks(symbol=config.symbol)
+        self._weex_connectivity_checks(symbols=self.symbols)
 
-    def _weex_connectivity_checks(self, symbol: str) -> None:
-        weex_symbol = to_weex_contract_symbol(symbol)
+    def _weex_connectivity_checks(self, symbols: list[str]) -> None:
         logger.info("[WEEX] Connectivity checks per official guide")
-        logger.info(f"[WEEX] Target symbol: {symbol} -> {weex_symbol}")
+        logger.info(f"[WEEX] Symbols: {', '.join(symbols)}")
 
         # 1) Public ticker
         try:
-            prices = WeexRestMultiPriceProvider()
-            tick = prices.get_tick([symbol], now=datetime.utcnow())
-            last, _atr = tick.get(symbol, (0.0, 0.0))
-            logger.info(f"[WEEX] Market ticker OK (last={last})")
+            base_prices = WeexRestMultiPriceProvider()
+            now = datetime.utcnow()
+            for s in symbols:
+                tick = base_prices.get_tick([s], now=now)
+                last, _atr = tick.get(s, (0.0, 0.0))
+                logger.info(f"[WEEX] Market ticker OK for {s} (last={last})")
         except Exception as e:
             raise RuntimeError(f"WEEX public ticker failed: {e}")
 
@@ -191,10 +267,16 @@ class AutonomousOrchestratorTest:
         # 3) Set leverage
         try:
             if hasattr(self.execution, "set_leverage"):
-                self.execution.set_leverage(symbol=symbol, leverage=int(os.getenv("WEEX_LEVERAGE", "2")))
+                self.execution.set_leverage(symbol=symbols[0], leverage=int(os.getenv("WEEX_LEVERAGE", "2")))
             logger.info("[WEEX] Set leverage OK")
         except Exception as e:
             raise RuntimeError(f"WEEX set leverage failed: {e}")
+
+    def _pick_active_symbol(self) -> str:
+        pos = self.execution.position()
+        if pos is not None and getattr(pos, "symbol", None):
+            return str(pos.symbol)
+        return self.symbols[(self.tick_count - 1) % len(self.symbols)]
 
     def run(self):
         """Run autonomous orchestrator test."""
@@ -215,6 +297,13 @@ class AutonomousOrchestratorTest:
 
             try:
                 now = datetime.utcnow()
+
+                # Pre-warm history for ALL symbols each tick so correlation can work.
+                warm_symbols = list(dict.fromkeys([self.correlation.lead_symbol, *self.symbols]))
+                self.prices.get_tick(warm_symbols, now=now)
+
+                active_symbol = self._pick_active_symbol()
+                self.orchestrator.config.symbol = active_symbol
                 self.orchestrator.step(now=now)
 
                 # Track trades as "positions opened" (entries)
@@ -289,20 +378,29 @@ def main():
     parser.add_argument(
         "--duration",
         type=int,
-        default=360,
-        help="Duration in seconds (default: 360 = 6 min)",
+        default=900,
+        help="Duration in seconds (default: 900 = 15 min)",
+    )
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        default=os.getenv(
+            "WEEX_SYMBOLS",
+            "BTC/USDT,ETH/USDT,BNB/USDT,XRP/USDT,SOL/USDT,ADA/USDT,DOGE/USDT,LTC/USDT",
+        ),
+        help="Comma-separated symbols list. Also supports env WEEX_SYMBOLS.",
     )
     parser.add_argument(
         "--symbol",
         type=str,
-        default=os.getenv("WEEX_SYMBOL", "BTC/USDT"),
-        help="Trading symbol (default: BTC/USDT). Also supports env WEEX_SYMBOL.",
+        default=os.getenv("WEEX_SYMBOL", ""),
+        help="(Deprecated) Single symbol override. Prefer --symbols.",
     )
     parser.add_argument(
         "--min-trades",
         type=int,
-        default=10,
-        help="Minimum trades required (default: 10)",
+        default=6,
+        help="Minimum trades required (default: 6)",
     )
     parser.add_argument(
         "--log-file",
@@ -312,9 +410,15 @@ def main():
     )
     args = parser.parse_args()
 
+    symbols: list[str]
+    if args.symbol:
+        symbols = [str(args.symbol).strip()]
+    else:
+        symbols = [s.strip() for s in str(args.symbols).split(",") if s.strip()]
+
     try:
         test = AutonomousOrchestratorTest(
-            symbol=args.symbol,
+            symbols=symbols,
             duration_seconds=args.duration,
             min_trades=args.min_trades,
             log_file=args.log_file,

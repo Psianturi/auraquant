@@ -53,9 +53,6 @@ class CryptoPanicProvider:
         if not self.api_token:
             raise RuntimeError("CRYPTOPANIC_API_TOKEN is missing. Use StaticNewsProvider for local demo.")
 
-        # Import lazily so StaticNewsProvider does not require requests.
-        import requests
-
         base = (self.base_url or "https://cryptopanic.com/api/developer/v2").rstrip("/")
         url = f"{base}/posts/"
         params = {
@@ -66,8 +63,25 @@ class CryptoPanicProvider:
 
         assert self.session is not None
         resp = self.session.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        payload = resp.json()
+        if resp.status_code == 404:
+            alt_base = None
+            if "/api/v1" in base:
+                alt_base = "https://cryptopanic.com/api/developer/v2"
+            elif "/api/developer/v2" in base:
+                alt_base = "https://cryptopanic.com/api/v1"
+
+            if alt_base:
+                alt_url = f"{alt_base.rstrip('/')}/posts/"
+                resp = self.session.get(alt_url, params=params, timeout=15)
+
+        if resp.status_code != 200:
+            # Avoid leaking auth token in exceptions.
+            raise RuntimeError(f"CryptoPanic HTTP {resp.status_code} while fetching posts")
+
+        try:
+            payload = resp.json()
+        except Exception as e:
+            raise RuntimeError("CryptoPanic returned non-JSON response") from e
 
         results = payload.get("results") or []
         items: List[NewsItem] = []
