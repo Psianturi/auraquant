@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 
-
 Usage:
     python src/test_demo_orchestrator_realtime.py --duration 550 --min-trades 10
 
@@ -195,42 +194,28 @@ class AutonomousOrchestratorTest:
 
         total_time = (self.end_time - self.start_time).total_seconds()
 
-        report = f"""
-╔════════════════════════════════════════════════════════════════╗
-║   AUTONOMOUS ORCHESTRATOR TEST REPORT (Jan 15, 2026)          ║
-╚════════════════════════════════════════════════════════════════╝
-
-[TEST PARAMETERS]
-  Duration: {total_time:.1f}s (target: {self.duration_seconds}s)
-  Min Trades Required: {self.min_trades}
-  Actual Trades Executed: {self.trade_count}
-  Ticks Completed: {self.tick_count}
-
-[AI LOGGING METRICS]
-  AI Log Events Generated: {self.ai_log_count}
-  Successfully Uploaded: {self.upload_success}
-  Queued (failed initially): {self.upload_failed}
-  Local Store: {self.log_file}
-
-[COMPLIANCE CHECKLIST]
-  ✓ Full orchestrator pipeline tested (SCAN/QUALIFY/ENTER/RECONCILE)
-  ✓ AI decisions logged to local NDJSON
-  ✓ Real-time upload to WEEX initiated
-  ✓ Retry queue + disk persistence active
-  {"✓" if self.trade_count >= self.min_trades else "✗"} Minimum {self.min_trades} trades ({self.trade_count} actual)
-
-[STATUS]
-  {"✓ PASS" if self.trade_count >= self.min_trades else "⚠ CHECK"}
-
-[NEXT STEPS FOR JAN 19]
-  1. Verify AI log uploads succeed (check WEEX dashboard)
-  2. Run 2-3 more 10-12 min tests to validate stability
-  3. Monitor equity + PnL trends
-  4. Verify sentiment/correlation scores are realistic
-  5. Test real orchestrator (not synthetic) if available
-
-════════════════════════════════════════════════════════════════
-"""
+                status = "PASS" if self.trade_count >= self.min_trades else "CHECK"
+                report = (
+                        "\n"
+                        "============================================================\n"
+                        "AUTONOMOUS ORCHESTRATOR TEST REPORT\n"
+                        "============================================================\n"
+                        f"[TEST PARAMETERS]\n"
+                        f"  Duration: {total_time:.1f}s (target: {self.duration_seconds}s)\n"
+                        f"  Min Trades Required: {self.min_trades}\n"
+                        f"  Actual Trades Executed (positions_opened): {self.trade_count}\n"
+                        f"  Ticks Completed: {self.tick_count}\n"
+                        "\n"
+                        f"[AI LOGGING METRICS]\n"
+                        f"  AI Log Events Generated: {self.ai_log_count}\n"
+                        f"  Successfully Uploaded: {self.upload_success}\n"
+                        f"  Queued (failed initially): {self.upload_failed}\n"
+                        f"  Local Store: {self.log_file}\n"
+                        "\n"
+                        f"[STATUS]\n"
+                        f"  {status}\n"
+                        "============================================================\n"
+                )
         print(report)
         logger.info(report)
 
