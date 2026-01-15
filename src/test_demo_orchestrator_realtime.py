@@ -112,6 +112,21 @@ class CachedTickPriceProvider:
         return self._inner.get_recent_prices(symbol, window)
 
 
+@dataclass
+class FallbackNewsProvider(NewsProvider):
+    primary: NewsProvider
+    fallback: NewsProvider
+
+    def fetch_latest(self, symbol: str, limit: int = 5):
+        try:
+            items = self.primary.fetch_latest(symbol, limit=limit)
+            if items:
+                return items
+        except Exception:
+            pass
+        return self.fallback.fetch_latest(symbol, limit=limit)
+
+
 class AutonomousOrchestratorTest:
     """Run real orchestrator for N minutes with live ticks + AI logging."""
 
@@ -183,7 +198,8 @@ class AutonomousOrchestratorTest:
         using_cryptopanic = False
         if os.getenv("CRYPTOPANIC_API_TOKEN"):
             try:
-                provider = CryptoPanicProvider()
+                cp = CryptoPanicProvider()
+                provider = FallbackNewsProvider(primary=cp, fallback=PriceMomentumNewsProvider(prices=prices))
                 using_cryptopanic = True
             except Exception:
                 provider = PriceMomentumNewsProvider(prices=prices)
