@@ -229,8 +229,9 @@ class AutonomousOrchestratorTest:
         correlation = CorrelationTrigger(logger=bot_logger)
         risk = RiskEngine(logger=bot_logger)
   
-        risk.sl_atr_mult = 0.75
-        risk.tp_atr_mult = 1.25
+
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "1.5"))
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "3.0"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
