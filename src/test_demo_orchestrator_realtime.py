@@ -51,7 +51,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AlternatingNewsProvider(NewsProvider):
-    """Deterministic provider to exercise sentiment logic without external API keys."""
 
     _i: int = 0
 
@@ -197,28 +196,28 @@ class AutonomousOrchestratorTest:
 
         total_time = (self.end_time - self.start_time).total_seconds()
 
-                status = "PASS" if self.trade_count >= self.min_trades else "CHECK"
-                report = (
-                        "\n"
-                        "============================================================\n"
-                        "AUTONOMOUS ORCHESTRATOR TEST REPORT\n"
-                        "============================================================\n"
-                        f"[TEST PARAMETERS]\n"
-                        f"  Duration: {total_time:.1f}s (target: {self.duration_seconds}s)\n"
-                        f"  Min Trades Required: {self.min_trades}\n"
-                        f"  Actual Trades Executed (positions_opened): {self.trade_count}\n"
-                        f"  Ticks Completed: {self.tick_count}\n"
-                        "\n"
-                        f"[AI LOGGING METRICS]\n"
-                        f"  AI Log Events Generated: {self.ai_log_count}\n"
-                        f"  Successfully Uploaded: {self.upload_success}\n"
-                        f"  Queued (failed initially): {self.upload_failed}\n"
-                        f"  Local Store: {self.log_file}\n"
-                        "\n"
-                        f"[STATUS]\n"
-                        f"  {status}\n"
-                        "============================================================\n"
-                )
+        status = "PASS" if self.trade_count >= self.min_trades else "CHECK"
+        report = (
+            "\n"
+            "============================================================\n"
+            "AUTONOMOUS ORCHESTRATOR TEST REPORT\n"
+            "============================================================\n"
+            f"[TEST PARAMETERS]\n"
+            f"  Duration: {total_time:.1f}s (target: {self.duration_seconds}s)\n"
+            f"  Min Trades Required: {self.min_trades}\n"
+            f"  Actual Trades Executed (positions_opened): {self.trade_count}\n"
+            f"  Ticks Completed: {self.tick_count}\n"
+            "\n"
+            f"[AI LOGGING METRICS]\n"
+            f"  AI Log Events Generated: {self.ai_log_count}\n"
+            f"  Successfully Uploaded: {self.upload_success}\n"
+            f"  Queued (failed initially): {self.upload_failed}\n"
+            f"  Local Store: {self.log_file}\n"
+            "\n"
+            f"[STATUS]\n"
+            f"  {status}\n"
+            "============================================================\n"
+        )
         print(report)
         logger.info(report)
 
