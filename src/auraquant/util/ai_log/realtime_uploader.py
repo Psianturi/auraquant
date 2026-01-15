@@ -176,8 +176,7 @@ class RealTimeAiLogUploader:
     def _upload_sync(self, event_payload: Dict[str, Any]) -> bool:
         """Synchronous upload attempt. Raises on error."""
 
-        payload = [event_payload]
-        body_str = json.dumps(payload)
+        body_str = json.dumps(event_payload)
         
         hdrs = {"Content-Type": "application/json"}
         hdrs.update(self.headers)
@@ -207,6 +206,19 @@ class RealTimeAiLogUploader:
             raise RuntimeError(
                 f"WEEX AI log upload failed HTTP {resp.status_code}: {resp.text[:200]}"
             )
+        
+        # WEEX returns code "00000" on success, other codes are errors
+        try:
+            result = resp.json()
+            code = result.get("code", "")
+            if code != "00000":
+                msg = result.get("msg", "unknown error")
+                raise RuntimeError(
+                    f"WEEX AI log upload rejected: code={code}, msg={msg}"
+                )
+        except json.JSONDecodeError:
+            pass
+        
         self.logger.debug(f"[AI Log Uploader] Uploaded 1 event to {self.weex_upload_url}")
         return True
 
