@@ -78,7 +78,8 @@ class WeexOrderManager(BaseOrderManager):
         self._position: Optional[WeexLivePosition] = None
         self._positions_opened: int = 0
         self._trades_closed: int = 0
-        self._contract_rules_cache: Dict[str, Tuple[Optional[float], int]] = {}
+        # Cache: {weex_symbol: (min_order_size, step_size)}
+        self._contract_rules_cache: Dict[str, Tuple[Optional[float], float]] = {}
 
         self.reconcile(now=datetime.utcnow())
 
@@ -274,7 +275,7 @@ class WeexOrderManager(BaseOrderManager):
         if resp.status_code != 200:
             raise RuntimeError(f"WEEX close order failed HTTP {resp.status_code}: {resp.text[:200]}")
 
-    def _get_contract_rules(self, weex_symbol: str) -> Tuple[Optional[float], int]:
+    def _get_contract_rules(self, weex_symbol: str) -> Tuple[Optional[float], float]:
         cached = self._contract_rules_cache.get(weex_symbol)
         if cached is not None:
             return cached
@@ -283,13 +284,13 @@ class WeexOrderManager(BaseOrderManager):
         url = f"{base_url}/capi/v2/market/contracts"
         resp = requests.get(url, params={"symbol": weex_symbol}, timeout=15)
         if resp.status_code != 200:
-            self._contract_rules_cache[weex_symbol] = (None, 6)
+            self._contract_rules_cache[weex_symbol] = (None, 1.0)
             return self._contract_rules_cache[weex_symbol]
 
         try:
             payload = resp.json()
         except Exception:
-            self._contract_rules_cache[weex_symbol] = (None, 6)
+            self._contract_rules_cache[weex_symbol] = (None, 1.0)
             return self._contract_rules_cache[weex_symbol]
 
         items = None
@@ -299,7 +300,7 @@ class WeexOrderManager(BaseOrderManager):
             items = payload.get("data")
 
         min_order_size: Optional[float] = None
-        decimals: int = 6
+        step_size: float = 1.0
 
         if items and isinstance(items[0], dict):
             first = items[0]
@@ -312,33 +313,37 @@ class WeexOrderManager(BaseOrderManager):
                 except Exception:
                     min_order_size = None
 
-            inc = first.get("size_increment")
-            if isinstance(inc, int):
-                decimals = int(inc)
-            elif isinstance(inc, str):
-                s = inc.strip()
-                if s.isdigit():
-                    try:
-                        decimals = int(s)
-                    except Exception:
-                        decimals = 6
-                elif "." in s:
-                    frac = s.split(".", 1)[1]
-                    decimals = len(frac.rstrip("0")) if frac else 0
 
-        self._contract_rules_cache[weex_symbol] = (min_order_size, int(decimals))
+            for key in ("stepSize", "step_size", "sizeStep", "size_step", "sizeIncrement", "size_increment"):
+                inc = first.get(key)
+                if inc is None:
+                    continue
+                try:
+                    step_size = float(inc)
+                    if step_size <= 0:
+                        step_size = 1.0
+                except Exception:
+                    step_size = 1.0
+                break
+
+        self._contract_rules_cache[weex_symbol] = (min_order_size, float(step_size))
         return self._contract_rules_cache[weex_symbol]
 
     def _compute_order_size(self, weex_symbol: str, notional_usdt: float, price: float) -> float:
-        min_order_size, decimals = self._get_contract_rules(weex_symbol)
+        min_order_size, step_size = self._get_contract_rules(weex_symbol)
         price = max(float(price), 1e-12)
         raw = float(notional_usdt) / price
 
         if isinstance(min_order_size, (int, float)) and raw < float(min_order_size):
             raw = float(min_order_size)
 
-        factor = 10 ** int(decimals)
-        floored = math.floor(raw * factor) / factor
+        step = float(step_size) if float(step_size) > 0 else 1.0
+        # Quantize down to the allowed increment (e.g. stepSize=10 => 40, 50, ...)
+        floored = math.floor(raw / step) * step
+        # If we floored to zero but a min size exists, bump to the smallest valid step >= min.
+        if floored <= 0 and isinstance(min_order_size, (int, float)) and float(min_order_size) > 0:
+            floored = math.ceil(float(min_order_size) / step) * step
+
         return float(max(floored, 0.0))
 
     def _format_size(self, size: float) -> str:

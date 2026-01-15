@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+import json
 from typing import List, Optional, Protocol
 
 from .types import NewsItem
@@ -52,6 +54,33 @@ class CryptoPanicProvider:
     def fetch_latest(self, symbol: str, limit: int = 5) -> List[NewsItem]:
         if not self.api_token:
             raise RuntimeError("CRYPTOPANIC_API_TOKEN is missing. Use StaticNewsProvider for local demo.")
+
+        # Optional daily quota guard (off by default).
+        # Example: CRYPTOPANIC_MAX_REQ_PER_DAY=7
+        max_per_day_s = os.getenv("CRYPTOPANIC_MAX_REQ_PER_DAY")
+        if max_per_day_s:
+            try:
+                max_per_day = int(max_per_day_s)
+            except Exception:
+                max_per_day = 0
+
+            if max_per_day > 0:
+                usage_path = Path(os.getenv("CRYPTOPANIC_USAGE_PATH", "ai_logs/cryptopanic_usage.json"))
+                usage_path.parent.mkdir(parents=True, exist_ok=True)
+
+                today = datetime.utcnow().strftime("%Y-%m-%d")
+                try:
+                    data = json.loads(usage_path.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+
+                used = int(data.get(today, 0) or 0)
+                if used >= max_per_day:
+                    # Do not call the API; return empty news so sentiment can fall back.
+                    return []
+
+                data[today] = used + 1
+                usage_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
         base = (self.base_url or "https://cryptopanic.com/api/developer/v2").rstrip("/")
         url = f"{base}/posts/"

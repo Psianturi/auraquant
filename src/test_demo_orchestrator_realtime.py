@@ -180,9 +180,11 @@ class AutonomousOrchestratorTest:
 
         # Prefer real news if CRYPTOPANIC_API_TOKEN is set; else fall back to real-price momentum.
         provider: NewsProvider
+        using_cryptopanic = False
         if os.getenv("CRYPTOPANIC_API_TOKEN"):
             try:
                 provider = CryptoPanicProvider()
+                using_cryptopanic = True
             except Exception:
                 provider = PriceMomentumNewsProvider(prices=prices)
         else:
@@ -198,7 +200,14 @@ class AutonomousOrchestratorTest:
             sentiment.short_threshold = float(os.getenv("SENTIMENT_SHORT_THRESHOLD", "-0.05"))
         except Exception:
             sentiment.short_threshold = -0.05
-        sentiment.news_cache_ttl_minutes = 0.0
+        # CryptoPanic dev plan is quota-limited and 24h delayed; cache by default.
+        if using_cryptopanic:
+            try:
+                sentiment.news_cache_ttl_minutes = float(os.getenv("SENTIMENT_NEWS_CACHE_TTL_MINUTES", "60"))
+            except Exception:
+                sentiment.news_cache_ttl_minutes = 60.0
+        else:
+            sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
         risk = RiskEngine(logger=bot_logger)
   
