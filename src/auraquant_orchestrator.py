@@ -138,7 +138,7 @@ class AutonomousOrchestratorTest:
         symbols: list[str],
         duration_seconds: int = 900,
         min_trades: int = 6,
-        log_file: str = "ai_logs/test_demo_orchestrator_realtime.ndjson",
+        log_file: str = "ai_logs/auraquant_orchestrator.ndjson",
     ):
         if not symbols:
             raise ValueError("symbols list cannot be empty")
@@ -235,8 +235,8 @@ class AutonomousOrchestratorTest:
         risk = RiskEngine(logger=bot_logger)
         
         risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "1"))
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "3.0"))  
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.75"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.7"))  
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.8"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
@@ -461,7 +461,7 @@ class AutonomousOrchestratorTest:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Autonomous orchestrator real-time test (10-12 min with AI logging)"
+        description="AuraQuant orchestrator real-time runner (with AI logging)"
     )
     parser.add_argument(
         "--duration",
@@ -493,7 +493,7 @@ def main():
     parser.add_argument(
         "--log-file",
         type=str,
-        default="ai_logs/test_demo_orchestrator_realtime.ndjson",
+        default="ai_logs/auraquant_orchestrator.ndjson",
         help="AI log file",
     )
     args = parser.parse_args()

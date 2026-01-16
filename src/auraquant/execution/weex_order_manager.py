@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -93,6 +94,14 @@ class WeexOrderManager(BaseOrderManager):
 
         self._position_sync_block_until: float = 0.0
         self._position_sync_block_seconds: float = 60.0
+
+        # If the assets endpoint is flaky (e.g. HTTP 5xx/521), avoid spamming it.
+        self._assets_sync_block_until: float = 0.0
+        self._assets_sync_backoff_seconds: float = 2.0
+        try:
+            self._assets_sync_backoff_max_seconds = float(os.getenv("WEEX_ASSETS_BACKOFF_MAX_SECONDS", "60"))
+        except Exception:
+            self._assets_sync_backoff_max_seconds = 60.0
 
         self.reconcile(now=datetime.utcnow())
 
@@ -288,6 +297,24 @@ class WeexOrderManager(BaseOrderManager):
             # Handle 40015: position side invalid / pending order conflict
             if "40015" in msg or "position side invalid" in msg.lower():
                 logger.warning(f"[WEEX] Close rejected 40015 ({reason}). Details: {msg[:200]}")
+
+                blocking_order_id: Optional[str] = None
+                m = re.search(r"\\border\\s+(\\d+)", msg)
+                if m:
+                    blocking_order_id = m.group(1)
+
+                if blocking_order_id:
+                    try:
+                        self._cancel_order_by_id(weex_symbol=weex_symbol, order_id=blocking_order_id)
+                    except Exception as cancel_err:
+                        logger.warning(f"[WEEX] Failed to cancel blocking order {blocking_order_id}: {cancel_err}")
+
+                    # Retry close once after cancelling the blocking order.
+                    try:
+                        self._close_position_market(pos=pos, price_hint=price_hint)
+                    except Exception as retry_err:
+                        logger.warning(f"[WEEX] Close retry after cancel failed ({reason}): {str(retry_err)[:200]}")
+
                 try:
                     sync = self._sync_position_from_weex(weex_symbol=weex_symbol)
                 except Exception as sync_err:
@@ -321,6 +348,45 @@ class WeexOrderManager(BaseOrderManager):
                 logger.debug(f"[WEEX] Cancel orders response: {resp.status_code}")
         except Exception as e:
             logger.debug(f"[WEEX] Cancel orders exception: {e}")
+
+    def _cancel_order_by_id(self, weex_symbol: str, order_id: str) -> None:
+        """Best-effort cancel for a single blocking order.
+
+        WEEX error 40015 sometimes includes an order id that must be cancelled
+        before a close is allowed.
+        """
+
+        order_id = str(order_id).strip()
+        if not order_id:
+            return
+
+        endpoints = (
+            "/capi/v2/order/cancelOrder",
+            "/capi/v2/order/cancel",
+            "/capi/v2/order/cancelById",
+        )
+        payloads = (
+            {"symbol": weex_symbol, "orderId": order_id},
+            {"symbol": weex_symbol, "order_id": order_id},
+            {"orderId": order_id},
+            {"order_id": order_id},
+        )
+
+        for ep in endpoints:
+            for body in payloads:
+                try:
+                    resp = self.client.signed_post(ep, body)
+                except Exception as e:
+                    logger.debug(f"[WEEX] Cancel order {order_id} failed calling {ep}: {e}")
+                    continue
+
+                if resp.status_code == 200:
+                    logger.info(f"[WEEX] Cancelled blocking order {order_id} via {ep}")
+                    return
+
+                logger.debug(
+                    f"[WEEX] Cancel order {order_id} via {ep} returned HTTP {resp.status_code}: {resp.text[:120]}"
+                )
 
     def _sync_position_from_weex(self, weex_symbol: Optional[str] = None) -> Optional[bool]:
         """Sync local position state from WEEX.
@@ -388,14 +454,49 @@ class WeexOrderManager(BaseOrderManager):
 
     def reconcile(self, now: Optional[datetime] = None) -> None:
         _ = now
+        # Keep startup strict (so init/health checks fail fast), but when the bot
+        # is already running, avoid hammering the assets endpoint during exchange
+        # instability (e.g. HTTP 521/5xx).
+        strict = self._starting_equity is None
+
+        if not strict:
+            now_ts = time.time()
+            if now_ts < self._assets_sync_block_until:
+                return
+
         resp = self.client.signed_get("/capi/v2/account/assets")
         if resp.status_code != 200:
+            if not strict and (resp.status_code >= 500 or resp.status_code in (429, 408)):
+                logger.warning(
+                    f"[WEEX] Assets query failed HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+                now_ts = time.time()
+                delay = float(max(1.0, self._assets_sync_backoff_seconds))
+                self._assets_sync_block_until = now_ts + delay
+                self._assets_sync_backoff_seconds = min(
+                    float(self._assets_sync_backoff_seconds) * 2.0, float(self._assets_sync_backoff_max_seconds)
+                )
+                return
+
             raise RuntimeError(f"WEEX assets failed HTTP {resp.status_code}: {resp.text[:200]}")
 
         try:
             data = resp.json()
         except Exception as e:
+            if not strict:
+                logger.warning(f"[WEEX] Assets returned non-JSON; backing off: {e}")
+                now_ts = time.time()
+                delay = float(max(1.0, self._assets_sync_backoff_seconds))
+                self._assets_sync_block_until = now_ts + delay
+                self._assets_sync_backoff_seconds = min(
+                    float(self._assets_sync_backoff_seconds) * 2.0, float(self._assets_sync_backoff_max_seconds)
+                )
+                return
             raise RuntimeError("WEEX assets returned non-JSON") from e
+
+
+        self._assets_sync_block_until = 0.0
+        self._assets_sync_backoff_seconds = 2.0
 
         equity = self._parse_usdt_equity(data)
         if equity is None:
