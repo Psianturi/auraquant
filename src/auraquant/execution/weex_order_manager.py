@@ -85,9 +85,12 @@ class WeexOrderManager(BaseOrderManager):
         self._contract_rules_cache: Dict[str, Tuple[Optional[float], float]] = {}
         # Track last close attempt to prevent spam
         self._last_close_attempt: float = 0.0
-        self._close_retry_cooldown: float = 10.0  
 
-        # If the exchange position endpoint is flaky (e.g. HTTP 521), avoid spamming
+        try:
+            self._close_retry_cooldown = float(os.getenv("WEEX_CLOSE_RETRY_COOLDOWN_SECONDS", "60"))
+        except Exception:
+            self._close_retry_cooldown = 60.0
+
         self._position_sync_block_until: float = 0.0
         self._position_sync_block_seconds: float = 60.0
 
@@ -210,11 +213,12 @@ class WeexOrderManager(BaseOrderManager):
         exit_price = pos.take_profit if hit_tp else pos.stop_loss
         equity_before = float(self._equity)
 
-        # Use safe close method that doesn't raise on failure
-        close_success = self._safe_close_position(pos=pos, reason="SL/TP hit")
-        if not close_success:
-            # Close failed - don't mark as closed, will retry next tick
-            logger.warning(f"[WEEX] Close failed for {symbol}, will retry next tick")
+        # Use safe close method that doesn't raise on failure.
+        close_result = self._safe_close_position(pos=pos, reason="SL/TP hit", price_hint=float(exit_price))
+        if close_result is None:
+            return None
+        if close_result is False:
+            logger.warning(f"[WEEX] Close attempt failed for {symbol}, will retry")
             return None
 
         try:
@@ -237,19 +241,24 @@ class WeexOrderManager(BaseOrderManager):
         if pos is None:
             return False
         
-        return self._safe_close_position(pos=pos, reason="best_effort")
+        return bool(self._safe_close_position(pos=pos, reason="best_effort"))
 
-    def _safe_close_position(self, pos: WeexLivePosition, reason: str = "") -> bool:
+    def _safe_close_position(
+        self,
+        pos: WeexLivePosition,
+        reason: str = "",
+        price_hint: Optional[float] = None,
+    ) -> Optional[bool]:
 
         now_ts = time.time()
         if now_ts < self._position_sync_block_until:
             logger.warning(f"[WEEX] Position sync degraded; skipping close attempt ({reason})")
-            return False
+            return None
 
         # Check cooldown to prevent close spam
         if now_ts - self._last_close_attempt < self._close_retry_cooldown:
             logger.debug(f"[WEEX] Close cooldown active, skipping ({reason})")
-            return False
+            return None
         self._last_close_attempt = now_ts
         
         weex_symbol = pos.weex_symbol or self._resolve_weex_symbol(pos.symbol)
@@ -262,7 +271,7 @@ class WeexOrderManager(BaseOrderManager):
         
         # Step 2: Attempt close
         try:
-            self._close_position_market(pos=pos)
+            self._close_position_market(pos=pos, price_hint=price_hint)
 
             sync = self._sync_position_from_weex(weex_symbol=weex_symbol)
             if sync is True:
@@ -278,7 +287,7 @@ class WeexOrderManager(BaseOrderManager):
             
             # Handle 40015: position side invalid / pending order conflict
             if "40015" in msg or "position side invalid" in msg.lower():
-                logger.warning(f"[WEEX] Close rejected 40015 ({reason}). Syncing...")
+                logger.warning(f"[WEEX] Close rejected 40015 ({reason}). Details: {msg[:200]}")
                 try:
                     sync = self._sync_position_from_weex(weex_symbol=weex_symbol)
                 except Exception as sync_err:
@@ -294,6 +303,10 @@ class WeexOrderManager(BaseOrderManager):
             
             # Handle other errors gracefully
             logger.error(f"[WEEX] Close error ({reason}): {msg[:150]}")
+            return False
+
+        except Exception as exc:
+            logger.error(f"[WEEX] Close exception ({reason}): {exc}")
             return False
     
     def _cancel_all_orders(self, weex_symbol: str) -> None:
@@ -321,7 +334,9 @@ class WeexOrderManager(BaseOrderManager):
         try:
             resp = self.client.signed_get("/capi/v2/position/allPosition")
             if resp.status_code != 200:
-                logger.warning(f"[WEEX] Position query failed HTTP {resp.status_code}")
+                logger.warning(
+                    f"[WEEX] Position query failed HTTP {resp.status_code}: {resp.text[:200]}"
+                )
                 if resp.status_code >= 500 or resp.status_code in (429, 408):
                     self._position_sync_block_until = time.time() + float(self._position_sync_block_seconds)
                 return None
@@ -439,7 +454,7 @@ class WeexOrderManager(BaseOrderManager):
             return str(pinned)
         return to_weex_contract_symbol(symbol)
 
-    def _close_position_market(self, pos: WeexLivePosition) -> None:
+    def _close_position_market(self, pos: WeexLivePosition, price_hint: Optional[float] = None) -> None:
         if not self.execute_orders:
             raise RuntimeError("Live execution disabled; cannot close position")
 
@@ -452,7 +467,8 @@ class WeexOrderManager(BaseOrderManager):
             "type": type_code,
             "order_type": "0",
             "match_price": "1",
-            "price": str(float(pos.entry_price)),
+            # Prefer a fresh price hint when available (SL/TP exit), otherwise fall back.
+            "price": str(float(price_hint) if price_hint is not None else float(pos.entry_price)),
             "marginMode": int(self.margin_mode),
         }
 

@@ -339,6 +339,13 @@ class AutonomousOrchestratorTest:
         tick_interval = int(getattr(self.orchestrator.config, "tick_seconds", 20) or 20)
 
         last_progress_log = 0  # Track last progress log time (minutes)
+        last_max_hold_close_attempt_ts = 0.0
+        try:
+            max_hold_retry_interval_seconds = float(
+                os.getenv("MAX_HOLD_RETRY_INTERVAL_SECONDS", "60")
+            )
+        except Exception:
+            max_hold_retry_interval_seconds = 60.0
         while True:
             self.tick_count += 1
             elapsed = (datetime.now(timezone.utc) - self.start_time).total_seconds()
@@ -369,10 +376,17 @@ class AutonomousOrchestratorTest:
                                 f"[MANAGE] Max hold exceeded ({held_for:.0f}s >= {max_hold_seconds}s). "
                                 "Attempting best-effort close."
                             )
-                            try:
-                                self.execution.close_open_position_best_effort()
-                            except Exception as exc:
-                                logger.warning(f"[MANAGE] Max-hold close failed: {exc}")
+                            now_ts = time.time()
+                            if now_ts - last_max_hold_close_attempt_ts >= max_hold_retry_interval_seconds:
+                                last_max_hold_close_attempt_ts = now_ts
+                                try:
+                                    self.execution.close_open_position_best_effort()
+                                except Exception as exc:
+                                    logger.warning(f"[MANAGE] Max-hold close failed: {exc}")
+                            else:
+                                logger.warning(
+                                    "[MANAGE] Max-hold close throttled; waiting before retry"
+                                )
                         else:
                             logger.warning("[MANAGE] Max hold exceeded but execution has no close method.")
 
