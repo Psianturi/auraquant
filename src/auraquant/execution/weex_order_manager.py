@@ -84,6 +84,9 @@ class WeexOrderManager(BaseOrderManager):
         self._trades_closed: int = 0
         # Cache: {weex_symbol: (min_order_size, step_size)}
         self._contract_rules_cache: Dict[str, Tuple[Optional[float], float]] = {}
+        # Track last close attempt to prevent spam
+        self._last_close_attempt: float = 0.0
+        self._close_retry_cooldown: float = 10.0  
 
         self.reconcile(now=datetime.utcnow())
 
@@ -204,9 +207,12 @@ class WeexOrderManager(BaseOrderManager):
         exit_price = pos.take_profit if hit_tp else pos.stop_loss
         equity_before = float(self._equity)
 
-        # Important safety rule: only mark the position closed if the exchange
-        # close order succeeds.
-        self._close_position_market(pos=pos)
+        # Use safe close method that doesn't raise on failure
+        close_success = self._safe_close_position(pos=pos, reason="SL/TP hit")
+        if not close_success:
+            # Close failed - don't mark as closed, will retry next tick
+            logger.warning(f"[WEEX] Close failed for {symbol}, will retry next tick")
+            return None
 
         try:
             self.reconcile(now=now)
@@ -224,32 +230,69 @@ class WeexOrderManager(BaseOrderManager):
         Returns True if a close order was sent successfully.
         Does nothing (and returns False) if there is no open position.
         """
-
         pos = self.position()
         if pos is None:
             return False
+        
+        return self._safe_close_position(pos=pos, reason="best_effort")
 
+    def _safe_close_position(self, pos: WeexLivePosition, reason: str = "") -> bool:
+
+        # Check cooldown to prevent close spam
+        now_ts = time.time()
+        if now_ts - self._last_close_attempt < self._close_retry_cooldown:
+            logger.debug(f"[WEEX] Close cooldown active, skipping ({reason})")
+            return False
+        self._last_close_attempt = now_ts
+        
+        weex_symbol = pos.weex_symbol or self._resolve_weex_symbol(pos.symbol)
+        
+        # Step 1: Cancel any pending orders first (root cause of 40015)
+        try:
+            self._cancel_all_orders(weex_symbol)
+        except Exception as e:
+            logger.warning(f"[WEEX] Cancel orders failed (non-fatal): {e}")
+        
+        # Step 2: Attempt close
         try:
             self._close_position_market(pos=pos)
+            logger.info(f"[WEEX] Position closed successfully ({reason})")
             return True
         except RuntimeError as exc:
             msg = str(exc)
-            # If exchange reports position side invalid, it usually means the position
-
+            
+            # Handle 40015: position side invalid / pending order conflict
             if "40015" in msg or "position side invalid" in msg.lower():
-                logger.warning("[WEEX] Close rejected (position side invalid). Syncing with WEEX...")
+                logger.warning(f"[WEEX] Close rejected 40015 ({reason}). Syncing...")
                 try:
                     self._sync_position_from_weex()
                 except Exception as sync_err:
-                    logger.error(f"[WEEX] Position sync failed: {sync_err}")
-                # Only clear local state if sync confirms no open position
+                    logger.warning(f"[WEEX] Sync failed (will retry): {sync_err}")
+                
+                # Check if position actually closed
                 if self._position is None or not self._position.is_open:
-                    logger.info("[WEEX] Sync confirmed: no open position on exchange.")
-                    return False
+                    logger.info("[WEEX] Sync shows position closed.")
+                    return True 
                 else:
-                    logger.warning("[WEEX] Sync shows position still open. Manual intervention may be needed.")
+                    logger.warning("[WEEX] Position still open, will retry next tick.")
                     return False
-            raise
+            
+            # Handle other errors gracefully
+            logger.error(f"[WEEX] Close error ({reason}): {msg[:150]}")
+            return False
+    
+    def _cancel_all_orders(self, weex_symbol: str) -> None:
+        """Cancel all pending orders for a symbol to prevent 40015 conflicts."""
+        body = {"symbol": weex_symbol}
+        try:
+            resp = self.client.signed_post("/capi/v2/order/cancelAll", body)
+            if resp.status_code == 200:
+                logger.info(f"[WEEX] Cancelled pending orders for {weex_symbol}")
+            else:
+                # 404 or no orders is fine
+                logger.debug(f"[WEEX] Cancel orders response: {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"[WEEX] Cancel orders exception: {e}")
 
     def _sync_position_from_weex(self) -> None:
 
