@@ -364,7 +364,12 @@ class Orchestrator:
         assert decision.take_profit is not None
 
         # Pre-check margin before attempting order (avoid 40015 errors)
-        required_margin = decision.position_notional_usdt / decision.leverage_used
+        leverage = float(decision.leverage or 0.0)
+        if leverage <= 0:
+            leverage = float(getattr(intent, "requested_leverage", 1.0) or 1.0)
+        leverage = max(leverage, 1.0)
+
+        required_margin = decision.position_notional_usdt / leverage
         if hasattr(self.execution, 'available_margin'):
             avail = self.execution.available_margin()
             if avail < required_margin * 1.1: 

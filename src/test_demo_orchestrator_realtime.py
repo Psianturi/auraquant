@@ -234,9 +234,9 @@ class AutonomousOrchestratorTest:
         correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.12"))
         risk = RiskEngine(logger=bot_logger)
         
-        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "2"))
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "4.0"))  # Reasonable SL
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "5.0"))  # Realistic TP (was 9.5)
+        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "1"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "4.5"))
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "8.0"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
