@@ -230,13 +230,13 @@ class AutonomousOrchestratorTest:
         else:
             sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
-        # Lower correlation threshold → more trades approved (default 0.25 → 0.10)
-        correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.10"))
+        # Lower correlation threshold → more trades approved
+        correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.12"))
         risk = RiskEngine(logger=bot_logger)
         
-        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "1"))
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "5.0"))  # Wider SL to avoid quick stops
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "9.5"))  
+        risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "2"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "4.0"))  # Reasonable SL
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "5.0"))  # Realistic TP (was 9.5)
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
@@ -278,7 +278,6 @@ class AutonomousOrchestratorTest:
             ai_log_uploader=self.uploader,
         )
 
-        # Official guide connectivity checks (no secrets printed)
         self._weex_connectivity_checks(symbols=self.symbols)
 
     def _weex_connectivity_checks(self, symbols: list[str]) -> None:
@@ -318,8 +317,7 @@ class AutonomousOrchestratorTest:
         # QUALIFY/ENTER on symbol B (because phase advances on each step call).
         # That makes entries extremely unlikely.
         #
-        # Fix: only rotate symbols when we're in SCAN *and* flat. Otherwise keep the
-        # last chosen active symbol stable until we return to SCAN again.
+       
         pos = self.execution.position()
         if pos is not None and getattr(pos, "symbol", None):
             self._active_symbol = str(pos.symbol)
@@ -351,7 +349,6 @@ class AutonomousOrchestratorTest:
             try:
                 now = datetime.utcnow()
 
-                # Pre-warm history for ALL symbols each tick so correlation can work.
                 warm_symbols = list(dict.fromkeys([self.correlation.lead_symbol, *self.symbols]))
                 self.prices.get_tick(warm_symbols, now=now)
 

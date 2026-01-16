@@ -263,6 +263,49 @@ class WeexOrderManager(BaseOrderManager):
         if self._starting_equity is None:
             self._starting_equity = float(equity)
 
+    def available_margin(self) -> float:
+        """Get available margin for new positions.
+
+        Returns available USDT that can be used to open new positions.
+        This accounts for margin already locked in open positions.
+        """
+        resp = self.client.signed_get("/capi/v2/account/assets")
+        if resp.status_code != 200:
+            logger.warning(f"WEEX assets check failed HTTP {resp.status_code}")
+            return 0.0
+
+        try:
+            data = resp.json()
+        except Exception:
+            return 0.0
+
+        available = self._parse_available_margin(data)
+        return float(available) if available is not None else 0.0
+
+    def _parse_available_margin(self, data: object) -> Optional[float]:
+        if isinstance(data, dict):
+            payload = data.get("data") if "data" in data else data
+        else:
+            payload = data
+
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                currency = (item.get("currency") or item.get("coin") or item.get("asset") or "").upper()
+                if currency and currency != "USDT":
+                    continue
+                for k in ("available", "availableMargin", "availableBalance", "free"):
+                    v = item.get(k)
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                    if isinstance(v, str):
+                        try:
+                            return float(v)
+                        except Exception:
+                            continue
+        return None
+
     def _resolve_weex_symbol(self, symbol: str) -> str:
         pinned = os.getenv("WEEX_PRODUCT_SYMBOL")
         if pinned:

@@ -363,6 +363,22 @@ class Orchestrator:
         assert decision.stop_loss is not None
         assert decision.take_profit is not None
 
+        # Pre-check margin before attempting order (avoid 40015 errors)
+        required_margin = decision.position_notional_usdt / decision.leverage_used
+        if hasattr(self.execution, 'available_margin'):
+            avail = self.execution.available_margin()
+            if avail < required_margin * 1.1: 
+                log_json(self.logger, {
+                    "module": "Orchestrator",
+                    "timestamp": utc_iso(tick.now),
+                    "event": "ORDER_SKIPPED",
+                    "symbol": tick.symbol,
+                    "reason": "Insufficient margin (pre-check)",
+                    "available": round(avail, 2),
+                    "required": round(required_margin, 2),
+                }, level=logging.WARNING)
+                return
+
         try:
             self.execution.open_position(
                 symbol=tick.symbol,
