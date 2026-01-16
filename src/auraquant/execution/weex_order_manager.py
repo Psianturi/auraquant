@@ -73,8 +73,7 @@ class WeexOrderManager(BaseOrderManager):
         self.default_leverage = max(1, min(int(default_leverage), 20))
         self.margin_mode = int(margin_mode)
 
-        # If True, send preset SL/TP to exchange on entry. Default False to avoid
-        # double-closing (bot-managed close vs exchange-triggered SL/TP).
+
         self.use_preset_sltp = os.getenv("WEEX_USE_PRESET_SLTP", "0") == "1"
 
         self._starting_equity: Optional[float] = None
@@ -87,6 +86,10 @@ class WeexOrderManager(BaseOrderManager):
         # Track last close attempt to prevent spam
         self._last_close_attempt: float = 0.0
         self._close_retry_cooldown: float = 10.0  
+
+        # If the exchange position endpoint is flaky (e.g. HTTP 521), avoid spamming
+        self._position_sync_block_until: float = 0.0
+        self._position_sync_block_seconds: float = 60.0
 
         self.reconcile(now=datetime.utcnow())
 
@@ -238,8 +241,12 @@ class WeexOrderManager(BaseOrderManager):
 
     def _safe_close_position(self, pos: WeexLivePosition, reason: str = "") -> bool:
 
-        # Check cooldown to prevent close spam
         now_ts = time.time()
+        if now_ts < self._position_sync_block_until:
+            logger.warning(f"[WEEX] Position sync degraded; skipping close attempt ({reason})")
+            return False
+
+        # Check cooldown to prevent close spam
         if now_ts - self._last_close_attempt < self._close_retry_cooldown:
             logger.debug(f"[WEEX] Close cooldown active, skipping ({reason})")
             return False
@@ -256,8 +263,16 @@ class WeexOrderManager(BaseOrderManager):
         # Step 2: Attempt close
         try:
             self._close_position_market(pos=pos)
-            logger.info(f"[WEEX] Position closed successfully ({reason})")
-            return True
+
+            sync = self._sync_position_from_weex(weex_symbol=weex_symbol)
+            if sync is True:
+                logger.info(f"[WEEX] Position closed successfully ({reason})")
+                return True
+            if sync is False:
+                logger.warning(f"[WEEX] Close submitted but position still open; will retry ({reason})")
+                return False
+            logger.warning(f"[WEEX] Close submitted but position status unknown; will retry ({reason})")
+            return False
         except RuntimeError as exc:
             msg = str(exc)
             
@@ -265,12 +280,12 @@ class WeexOrderManager(BaseOrderManager):
             if "40015" in msg or "position side invalid" in msg.lower():
                 logger.warning(f"[WEEX] Close rejected 40015 ({reason}). Syncing...")
                 try:
-                    self._sync_position_from_weex()
+                    sync = self._sync_position_from_weex(weex_symbol=weex_symbol)
                 except Exception as sync_err:
                     logger.warning(f"[WEEX] Sync failed (will retry): {sync_err}")
+                    sync = None
                 
-                # Check if position actually closed
-                if self._position is None or not self._position.is_open:
+                if sync is True or self._position is None or not self._position.is_open:
                     logger.info("[WEEX] Sync shows position closed.")
                     return True 
                 else:
@@ -294,47 +309,67 @@ class WeexOrderManager(BaseOrderManager):
         except Exception as e:
             logger.debug(f"[WEEX] Cancel orders exception: {e}")
 
-    def _sync_position_from_weex(self) -> None:
+    def _sync_position_from_weex(self, weex_symbol: Optional[str] = None) -> Optional[bool]:
+        """Sync local position state from WEEX.
+
+        Returns:
+          - True  => confirmed no open position for this symbol
+          - False => confirmed an open position still exists
+          - None  => unable to confirm (transient API / parse failure)
+        """
 
         try:
             resp = self.client.signed_get("/capi/v2/position/allPosition")
             if resp.status_code != 200:
                 logger.warning(f"[WEEX] Position query failed HTTP {resp.status_code}")
-                return
-            
+                if resp.status_code >= 500 or resp.status_code in (429, 408):
+                    self._position_sync_block_until = time.time() + float(self._position_sync_block_seconds)
+                return None
+
             data = resp.json()
             positions = data.get("data", []) if isinstance(data, dict) else data
-            
-            if not positions or not isinstance(positions, list):
-                if self._position is not None:
-                    logger.info("[WEEX] No positions on exchange. Clearing local state.")
-                    self._position.is_open = False
-                    self._position = None
-                return
-            
-            # Check if any position is actually open (has size > 0)
-            has_open = False
-            for pos in positions:
-                if not isinstance(pos, dict):
-                    continue
-                size = pos.get("total") or pos.get("available") or pos.get("size") or 0
-                try:
-                    if float(size) > 0:
-                        has_open = True
-                        break
-                except (ValueError, TypeError):
-                    continue
-            
+            if not isinstance(positions, list):
+                return None
+
+            if weex_symbol is None and self._position is not None:
+                weex_symbol = self._position.weex_symbol
+
+            def _matches_symbol(p: dict) -> bool:
+                if not weex_symbol:
+                    return True
+                sym = p.get("symbol") or p.get("contractCode") or p.get("instrument") or p.get("instrumentId")
+                if sym is None:
+                    return False
+                return str(sym).strip().lower() == str(weex_symbol).strip().lower()
+
+            def _position_size(p: dict) -> float:
+                for k in ("total", "available", "size", "holdVol", "pos", "position"):
+                    v = p.get(k)
+                    if v is None:
+                        continue
+                    try:
+                        return float(v)
+                    except Exception:
+                        continue
+                return 0.0
+
+            relevant = [p for p in positions if isinstance(p, dict) and _matches_symbol(p)]
+            has_open = any(_position_size(p) > 0 for p in relevant) if relevant else False
+
             if not has_open:
                 if self._position is not None:
                     logger.info("[WEEX] No active position found. Clearing local state.")
                     self._position.is_open = False
                     self._position = None
-            else:
-                logger.info("[WEEX] Active position still exists on exchange.")
-                
+                return True
+
+            logger.info("[WEEX] Active position still exists on exchange.")
+            return False
+
         except Exception as e:
             logger.error(f"[WEEX] Position sync error: {e}")
+            self._position_sync_block_until = time.time() + float(self._position_sync_block_seconds)
+            return None
 
     def reconcile(self, now: Optional[datetime] = None) -> None:
         _ = now
