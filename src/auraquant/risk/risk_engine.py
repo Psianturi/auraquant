@@ -180,16 +180,15 @@ class RiskEngine:
     _state_loaded: bool = field(default=False, init=False, repr=False)
 
     max_leverage_allowed: float = 20.0
-    risk_per_trade_pct: float = 0.4  # Reduced from 0.5 to leave margin for concurrent positions
-    max_position_notional_pct: float = 10.0
+    risk_per_trade_pct: float = 0.4  
+    max_position_notional_pct: float = 5.0  # Allow 2+ positions simultaneously
 
-    sl_atr_mult: float = 1.5
-    tp_atr_mult: float = 3.0
+    sl_atr_mult: float = 2.0  # Breathing room to avoid premature stop-out
+    tp_atr_mult: float = 2.5  # R:R = 1.25:1, profitable with 45% win rate
 
     def validate_intent(self, intent_data: TradeIntent, equity_now: float, now: Optional[datetime] = None) -> RiskDecision:
         now = now or datetime.utcnow()
 
-        # Load persisted circuit breaker state once per process (best-effort).
         if self.state_path and not self._state_loaded:
             self._load_state_best_effort()
             self._state_loaded = True

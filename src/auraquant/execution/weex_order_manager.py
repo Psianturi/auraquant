@@ -235,14 +235,63 @@ class WeexOrderManager(BaseOrderManager):
         except RuntimeError as exc:
             msg = str(exc)
             # If exchange reports position side invalid, it usually means the position
-            # is already closed or not available to close. Clear local state to unblock.
-            if "40015" in msg and "position side invalid" in msg.lower():
-                logger.warning("[WEEX] Close rejected (position side invalid). Clearing local position.")
-                pos.is_open = False
-                self._position = None
-                self._trades_closed += 1
-                return False
+
+            if "40015" in msg or "position side invalid" in msg.lower():
+                logger.warning("[WEEX] Close rejected (position side invalid). Syncing with WEEX...")
+                try:
+                    self._sync_position_from_weex()
+                except Exception as sync_err:
+                    logger.error(f"[WEEX] Position sync failed: {sync_err}")
+                # Only clear local state if sync confirms no open position
+                if self._position is None or not self._position.is_open:
+                    logger.info("[WEEX] Sync confirmed: no open position on exchange.")
+                    return False
+                else:
+                    logger.warning("[WEEX] Sync shows position still open. Manual intervention may be needed.")
+                    return False
             raise
+
+    def _sync_position_from_weex(self) -> None:
+
+        try:
+            resp = self.client.signed_get("/capi/v2/position/allPosition")
+            if resp.status_code != 200:
+                logger.warning(f"[WEEX] Position query failed HTTP {resp.status_code}")
+                return
+            
+            data = resp.json()
+            positions = data.get("data", []) if isinstance(data, dict) else data
+            
+            if not positions or not isinstance(positions, list):
+                if self._position is not None:
+                    logger.info("[WEEX] No positions on exchange. Clearing local state.")
+                    self._position.is_open = False
+                    self._position = None
+                return
+            
+            # Check if any position is actually open (has size > 0)
+            has_open = False
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                size = pos.get("total") or pos.get("available") or pos.get("size") or 0
+                try:
+                    if float(size) > 0:
+                        has_open = True
+                        break
+                except (ValueError, TypeError):
+                    continue
+            
+            if not has_open:
+                if self._position is not None:
+                    logger.info("[WEEX] No active position found. Clearing local state.")
+                    self._position.is_open = False
+                    self._position = None
+            else:
+                logger.info("[WEEX] Active position still exists on exchange.")
+                
+        except Exception as e:
+            logger.error(f"[WEEX] Position sync error: {e}")
 
     def reconcile(self, now: Optional[datetime] = None) -> None:
         _ = now
