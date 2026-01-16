@@ -299,7 +299,7 @@ class WeexOrderManager(BaseOrderManager):
                 logger.warning(f"[WEEX] Close rejected 40015 ({reason}). Details: {msg[:200]}")
 
                 blocking_order_id: Optional[str] = None
-                m = re.search(r"\\border\\s+(\\d+)", msg)
+                m = re.search(r"\border\s+(\d+)", msg)
                 if m:
                     blocking_order_id = m.group(1)
 
