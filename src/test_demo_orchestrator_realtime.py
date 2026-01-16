@@ -53,7 +53,7 @@ class PriceMomentumNewsProvider(NewsProvider):
 
         # `symbol` is expected to be the internal pair format (e.g. "BTC/USDT").
         internal = symbol if "/" in symbol else f"{symbol}/USDT"
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         recent = self.prices.get_recent_prices(internal, window=12)
         bias = "flat"
         ret = 0.0
@@ -230,13 +230,13 @@ class AutonomousOrchestratorTest:
         else:
             sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
-        # Lower correlation threshold → more trades approved
-        correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.12"))
+       
+        correlation.corr_threshold = float(os.getenv("CORR_THRESHOLD", "0.50"))
         risk = RiskEngine(logger=bot_logger)
         
         risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "1"))
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "4.5"))
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "8.0"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "6.5"))
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "4.0"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
@@ -287,7 +287,7 @@ class AutonomousOrchestratorTest:
         # 1) Public ticker
         try:
             base_prices = WeexRestMultiPriceProvider()
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             for s in symbols:
                 tick = base_prices.get_tick([s], now=now)
                 last, _atr = tick.get(s, (0.0, 0.0))
@@ -297,7 +297,7 @@ class AutonomousOrchestratorTest:
 
         # 2) Private assets
         try:
-            self.execution.reconcile(now=datetime.utcnow())
+            self.execution.reconcile(now=datetime.now(timezone.utc).replace(tzinfo=None))
             logger.info(f"[WEEX] Account assets OK (equity={self.execution.equity():.4f} USDT)")
         except Exception as e:
             raise RuntimeError(f"WEEX account assets failed: {e}")
@@ -338,16 +338,23 @@ class AutonomousOrchestratorTest:
 
         tick_interval = int(getattr(self.orchestrator.config, "tick_seconds", 20) or 20)
 
+        last_progress_log = 0  # Track last progress log time (minutes)
         while True:
             self.tick_count += 1
             elapsed = (datetime.now(timezone.utc) - self.start_time).total_seconds()
+            elapsed_minutes = int(elapsed // 60)
+
+            # Log progress every 15 minutes
+            if elapsed_minutes > 0 and elapsed_minutes % 15 == 0 and elapsed_minutes != last_progress_log:
+                logger.info(f"[PROGRESS] Agent running {elapsed_minutes} minutes")
+                last_progress_log = elapsed_minutes
 
             if elapsed >= self.duration_seconds:
                 logger.info(f"[END] Duration limit ({elapsed:.1f}s >= {self.duration_seconds}s)")
                 break
 
             try:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc).replace(tzinfo=None) 
 
                 warm_symbols = list(dict.fromkeys([self.correlation.lead_symbol, *self.symbols]))
                 self.prices.get_tick(warm_symbols, now=now)

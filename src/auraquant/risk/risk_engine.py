@@ -180,7 +180,7 @@ class RiskEngine:
     _state_loaded: bool = field(default=False, init=False, repr=False)
 
     max_leverage_allowed: float = 20.0
-    risk_per_trade_pct: float = 0.5
+    risk_per_trade_pct: float = 0.4  # Reduced from 0.5 to leave margin for concurrent positions
     max_position_notional_pct: float = 10.0
 
     sl_atr_mult: float = 1.5
