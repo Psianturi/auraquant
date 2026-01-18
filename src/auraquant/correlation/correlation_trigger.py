@@ -101,8 +101,14 @@ class CorrelationTrigger:
         corr, lag = _best_lag_corr(lead_rets, tgt_rets, self.max_lag)
         strength = abs(float(corr))
 
-        allowed = strength >= float(self.corr_threshold)
+        positive_corr = float(corr) >= float(self.corr_threshold)
+        allowed = positive_corr
         side = "LONG" if bias == "LONG" else "SHORT"
+
+        why_msg = (
+            "Positive correlation confirmed" if allowed 
+            else f"Correlation {corr:.4f} below threshold (need >= {self.corr_threshold})"
+        )
 
         payload = {
             "module": "CorrelationTrigger",
@@ -115,7 +121,7 @@ class CorrelationTrigger:
             "window": int(self.window),
             "threshold": float(self.corr_threshold),
             "decision": "APPROVED" if allowed else "DENIED",
-            "why": "Correlation above threshold" if allowed else "Correlation below threshold",
+            "why": why_msg,
         }
         log_json(self.logger, payload, level=logging.INFO)
 

@@ -202,30 +202,36 @@ class AutonomousOrchestratorTest:
         provider: NewsProvider
         using_cryptopanic = False
         using_coingecko = False
+        provider_chain_desc: list[str] = []
 
         # Build fallback chain from bottom up:
         # PriceMomentum -> CoinGeckoMomentum -> CoinGeckoTrending -> CryptoPanic
         base_fallback: NewsProvider = PriceMomentumNewsProvider(prices=prices)
+        provider_chain_desc.append("PriceMomentum")
         
         cg_api_key = os.getenv("COINGECKO_API_KEY")
         if cg_api_key or os.getenv("COINGECKO_BASE_URL"):
             # CoinGecko Momentum as fallback
             base_fallback = FallbackNewsProvider(primary=CoinGeckoMomentumProvider(), fallback=base_fallback)
+            provider_chain_desc.insert(0, "CoinGeckoMomentum")
             # CoinGecko Trending as higher priority fallback (requires API key)
             if cg_api_key:
                 base_fallback = FallbackNewsProvider(primary=CoinGeckoTrendingProvider(), fallback=base_fallback)
+                provider_chain_desc.insert(0, "CoinGeckoTrending")
             using_coingecko = True
 
         if os.getenv("CRYPTOPANIC_API_TOKEN"):
             try:
                 cp = CryptoPanicProvider()
                 provider = FallbackNewsProvider(primary=cp, fallback=base_fallback)
+                provider_chain_desc.insert(0, "CryptoPanic")
                 using_cryptopanic = True
             except Exception:
                 provider = base_fallback
         else:
             provider = base_fallback
 
+        logger.info(f"[INIT] News provider chain: {' -> '.join(provider_chain_desc)}")
         sentiment = SentimentProcessor(logger=bot_logger, provider=provider)
       
         try:
@@ -259,7 +265,7 @@ class AutonomousOrchestratorTest:
             risk.max_position_notional_pct = float(os.getenv("MAX_POSITION_NOTIONAL_PCT", "4.5"))
         except Exception:
             risk.max_position_notional_pct = 4.5
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.65"))  
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.6"))  
         risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.8"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
