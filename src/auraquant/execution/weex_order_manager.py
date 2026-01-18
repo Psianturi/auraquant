@@ -397,23 +397,69 @@ class WeexOrderManager(BaseOrderManager):
           - None  => unable to confirm (transient API / parse failure)
         """
 
+    
+        mode = os.getenv("WEEX_POSITION_SYNC_MODE", "auto").strip().lower()
+        if weex_symbol is None and self._position is not None:
+            weex_symbol = self._position.weex_symbol
+
+        def _parse_positions(payload: object) -> Optional[list]:
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                data_val = payload.get("data")
+                if isinstance(data_val, list):
+                    return data_val
+                if any(k in payload for k in ("symbol", "side", "size", "total", "position")):
+                    return [payload]
+            return None
+
+        def _signed_get_first_ok(paths: tuple[str, ...], query: str = ""):
+            last_resp = None
+            for p in paths:
+                try:
+                    resp = self.client.signed_get(p, query=query)
+                except Exception as e:
+                    last_resp = e
+                    continue
+                last_resp = resp
+                if getattr(resp, "status_code", None) == 200:
+                    return resp
+                if resp.status_code in (400, 404):
+                    continue
+            return last_resp
+
         try:
-            resp = self.client.signed_get("/capi/v2/position/allPosition")
-            if resp.status_code != 200:
-                logger.warning(
-                    f"[WEEX] Position query failed HTTP {resp.status_code}: {resp.text[:200]}"
+            resp = None
+            # Try singlePosition first if allowed.
+            if mode in ("auto", "single") and weex_symbol:
+                single_paths = ("/capi/v2/account/position/singlePosition",)
+                query = f"?symbol={weex_symbol}"
+                resp = _signed_get_first_ok(single_paths, query=query)
+
+            # Fallback to allPosition if allowed or if single failed.
+            if resp is None or not hasattr(resp, "status_code"):
+                all_paths = (
+                    "/capi/v2/account/position/allPosition", 
+                    "/capi/v2/position/allPosition",          
                 )
+                if mode in ("auto", "all", "single"):
+                    resp = _signed_get_first_ok(all_paths)
+
+            if not hasattr(resp, "status_code"):
+                logger.warning(f"[WEEX] Position query failed (exception): {resp}")
+                self._position_sync_block_until = time.time() + float(self._position_sync_block_seconds)
+                return None
+
+            if resp.status_code != 200:
+                logger.warning(f"[WEEX] Position query failed HTTP {resp.status_code}: {resp.text[:200]}")
                 if resp.status_code >= 500 or resp.status_code in (429, 408):
                     self._position_sync_block_until = time.time() + float(self._position_sync_block_seconds)
                 return None
 
             data = resp.json()
-            positions = data.get("data", []) if isinstance(data, dict) else data
-            if not isinstance(positions, list):
+            positions = _parse_positions(data)
+            if positions is None:
                 return None
-
-            if weex_symbol is None and self._position is not None:
-                weex_symbol = self._position.weex_symbol
 
             def _matches_symbol(p: dict) -> bool:
                 if not weex_symbol:
