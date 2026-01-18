@@ -53,6 +53,9 @@ class Orchestrator:
 
     _qualified_features_by_symbol: Dict[str, object] = field(default_factory=dict, init=False, repr=False)
     _open_features_by_symbol: Dict[str, object] = field(default_factory=dict, init=False, repr=False)
+    # Cache sentiment from SCAN phase to use in QUALIFY phase (same tick context)
+    _last_scan_report: Optional[object] = field(default=None, init=False, repr=False)
+    _last_scan_symbol: Optional[str] = field(default=None, init=False, repr=False)
 
     def step(self, now: datetime) -> None:
         """Advance the bot by one tick."""
@@ -173,6 +176,11 @@ class Orchestrator:
 
     def _scan(self, tick: TickContext) -> None:
         report = self.sentiment.analyze(symbol=tick.symbol.split("/")[0], limit=5, now=tick.now)
+        
+        # Cache for QUALIFY phase
+        self._last_scan_report = report
+        self._last_scan_symbol = tick.symbol
+        
         payload = {
             "module": "Orchestrator",
             "timestamp": utc_iso(tick.now),
@@ -211,7 +219,11 @@ class Orchestrator:
                 log_json(self.logger, payload, level=logging.WARNING)
                 return None
 
-        report = self.sentiment.analyze(symbol=tick.symbol.split("/")[0], limit=5, now=tick.now)
+        # Use cached sentiment from SCAN phase if available and symbol matches
+        if self._last_scan_report is not None and self._last_scan_symbol == tick.symbol:
+            report = self._last_scan_report
+        else:
+            report = self.sentiment.analyze(symbol=tick.symbol.split("/")[0], limit=5, now=tick.now)
 
         # If position already open, not generate new intents.
         if self.execution.position() is not None:
