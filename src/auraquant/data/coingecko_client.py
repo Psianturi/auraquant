@@ -96,13 +96,19 @@ class CoinGeckoClient:
         if self.api_key is None:
             self.api_key = os.getenv("COINGECKO_API_KEY")
 
-        # CoinGecko docs: Pro keys are used against the Pro base URL.
-        # If the user explicitly sets COINGECKO_BASE_URL, respect it.
+       
         env_base_url = os.getenv("COINGECKO_BASE_URL")
         if env_base_url:
             self.base_url = env_base_url
         else:
-            self.base_url = PRO_API_BASE_URL if self.api_key else PUBLIC_API_BASE_URL
+            # Demo keys start with "CG-" and must use public API base
+            is_demo_key = bool(self.api_key and self.api_key.startswith("CG-"))
+            if is_demo_key:
+                self.base_url = PUBLIC_API_BASE_URL
+            elif self.api_key:
+                self.base_url = PRO_API_BASE_URL
+            else:
+                self.base_url = PUBLIC_API_BASE_URL
         self.base_url = self.base_url.rstrip("/")
 
         if self.cache is None:
@@ -111,13 +117,17 @@ class CoinGeckoClient:
             self.session = requests.Session()
 
     def _headers(self) -> Dict[str, str]:
-        # CoinGecko Pro keys typically use header: x-cg-pro-api-key
+        # CoinGecko keys:
+
         headers: Dict[str, str] = {
             "Accept": "application/json",
             "User-Agent": "AuraQuant/1.0 (CoinGecko Track)",
         }
         if self.api_key:
-            headers["x-cg-pro-api-key"] = self.api_key
+            if self.api_key.startswith("CG-"):
+                headers["x-cg-demo-api-key"] = self.api_key
+            else:
+                headers["x-cg-pro-api-key"] = self.api_key
         return headers
 
     def get_markets(
@@ -159,6 +169,31 @@ class CoinGeckoClient:
 
         self.cache.set_json(cache_key, data)
         return [CoinGeckoMarket.from_json(x) for x in data if isinstance(x, dict)]
+
+    def get_trending(self, ttl_seconds: float = 600.0) -> Dict[str, Any]:
+        """Fetch /search/trending for trending coins, NFTs, categories.
+        
+        Returns raw JSON dict with 'coins', 'nfts', 'categories' keys.
+        Cached for 10 minutes by default.
+        """
+        cache_key = "search_trending"
+        
+        assert self.cache is not None
+        cached = self.cache.get_json(cache_key, ttl_seconds=float(ttl_seconds))
+        if isinstance(cached, dict):
+            return cached
+
+        url = f"{self.base_url}/search/trending"
+        
+        assert self.session is not None
+        resp = self.session.get(url, headers=self._headers(), timeout=float(self.timeout_seconds))
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("Unexpected CoinGecko trending response")
+
+        self.cache.set_json(cache_key, data)
+        return data
 
 
 WEEX_BASE_TO_COINGECKO_ID: Dict[str, str] = {

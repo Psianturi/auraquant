@@ -24,7 +24,7 @@ from auraquant.data.weex_rest_price_provider import WeexRestMultiPriceProvider
 from auraquant.execution.weex_order_manager import WeexOrderManager
 from auraquant.learning import TradePolicyLearner
 from auraquant.risk.risk_engine import RiskEngine
-from auraquant.sentiment.providers import CryptoPanicProvider, NewsProvider
+from auraquant.sentiment.providers import CoinGeckoMomentumProvider, CoinGeckoTrendingProvider, CryptoPanicProvider, NewsProvider
 from auraquant.sentiment.sentiment_processor import SentimentProcessor
 from auraquant.sentiment.types import NewsItem
 from auraquant.util.ai_log.store import AiLogStore
@@ -198,18 +198,33 @@ class AutonomousOrchestratorTest:
         prices = CachedTickPriceProvider(WeexRestMultiPriceProvider())
         self.prices = prices
 
-        # Prefer real news if CRYPTOPANIC_API_TOKEN is set; else fall back to real-price momentum.
+        # Prefer real news if CRYPTOPANIC_API_TOKEN is set; fall back to CoinGecko Trending; then Momentum; then real-price.
         provider: NewsProvider
         using_cryptopanic = False
+        using_coingecko = False
+
+        # Build fallback chain from bottom up:
+        # PriceMomentum -> CoinGeckoMomentum -> CoinGeckoTrending -> CryptoPanic
+        base_fallback: NewsProvider = PriceMomentumNewsProvider(prices=prices)
+        
+        cg_api_key = os.getenv("COINGECKO_API_KEY")
+        if cg_api_key or os.getenv("COINGECKO_BASE_URL"):
+            # CoinGecko Momentum as fallback
+            base_fallback = FallbackNewsProvider(primary=CoinGeckoMomentumProvider(), fallback=base_fallback)
+            # CoinGecko Trending as higher priority fallback (requires API key)
+            if cg_api_key:
+                base_fallback = FallbackNewsProvider(primary=CoinGeckoTrendingProvider(), fallback=base_fallback)
+            using_coingecko = True
+
         if os.getenv("CRYPTOPANIC_API_TOKEN"):
             try:
                 cp = CryptoPanicProvider()
-                provider = FallbackNewsProvider(primary=cp, fallback=PriceMomentumNewsProvider(prices=prices))
+                provider = FallbackNewsProvider(primary=cp, fallback=base_fallback)
                 using_cryptopanic = True
             except Exception:
-                provider = PriceMomentumNewsProvider(prices=prices)
+                provider = base_fallback
         else:
-            provider = PriceMomentumNewsProvider(prices=prices)
+            provider = base_fallback
 
         sentiment = SentimentProcessor(logger=bot_logger, provider=provider)
       
@@ -221,12 +236,17 @@ class AutonomousOrchestratorTest:
             sentiment.short_threshold = float(os.getenv("SENTIMENT_SHORT_THRESHOLD", "-0.05"))
         except Exception:
             sentiment.short_threshold = -0.05
-        # CryptoPanic dev plan is quota-limited and 24h delayed; cache by default.
+        # Cache network-backed sentiment sources to avoid API spam.
         if using_cryptopanic:
             try:
                 sentiment.news_cache_ttl_minutes = float(os.getenv("SENTIMENT_NEWS_CACHE_TTL_MINUTES", "60"))
             except Exception:
                 sentiment.news_cache_ttl_minutes = 60.0
+        elif using_coingecko:
+            try:
+                sentiment.news_cache_ttl_minutes = float(os.getenv("SENTIMENT_NEWS_CACHE_TTL_MINUTES", "5"))
+            except Exception:
+                sentiment.news_cache_ttl_minutes = 5.0
         else:
             sentiment.news_cache_ttl_minutes = 0.0
         correlation = CorrelationTrigger(logger=bot_logger)
@@ -239,7 +259,7 @@ class AutonomousOrchestratorTest:
             risk.max_position_notional_pct = float(os.getenv("MAX_POSITION_NOTIONAL_PCT", "4.5"))
         except Exception:
             risk.max_position_notional_pct = 4.5
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.7"))  
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.65"))  
         risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.8"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import json
-from typing import List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 from .types import NewsItem
 
@@ -130,3 +130,228 @@ class CryptoPanicProvider:
             items.append(NewsItem(title=title, published_at=published_at, source=str(source), url=link))
 
         return items
+
+
+@dataclass
+class CoinGeckoTrendingProvider:
+    """Fallback news provider using CoinGecko Trending API.
+    
+    Fetches trending coins from CoinGecko when CryptoPanic quota is exhausted.
+    Generates synthetic news items from trending data for sentiment analysis.
+    """
+
+    def fetch_latest(self, symbol: str, limit: int = 5) -> List[NewsItem]:
+        try:
+            from auraquant.data.coingecko_client import CoinGeckoClient, WEEX_BASE_TO_COINGECKO_ID
+        except Exception as e:
+            raise RuntimeError("CoinGecko client unavailable") from e
+
+        internal = symbol if "/" in symbol else f"{symbol}/USDT"
+        base = internal.split("/")[0].upper().strip()
+        cid = WEEX_BASE_TO_COINGECKO_ID.get(base)
+        if not cid:
+            return []
+
+        ttl_seconds = float(os.getenv("COINGECKO_TRENDING_TTL_SECONDS", "600"))
+
+        client = CoinGeckoClient()
+        
+        try:
+            trending_data = client.get_trending(ttl_seconds=ttl_seconds)
+        except Exception:
+            # If trending fails, return empty and let momentum provider handle it
+            return []
+
+        items: List[NewsItem] = []
+        now = datetime.utcnow()
+
+        # Check if our symbol is in trending coins
+        trending_coins = trending_data.get("coins", [])
+        symbol_trending = False
+        symbol_rank = None
+        symbol_price_change = None
+        
+        for idx, coin_wrapper in enumerate(trending_coins):
+            coin = coin_wrapper.get("item", {})
+            coin_symbol = str(coin.get("symbol", "")).upper()
+            if coin_symbol == base:
+                symbol_trending = True
+                symbol_rank = idx + 1
+                # Extract 24h price change if available
+                price_data = coin.get("data", {})
+                pct_24h = price_data.get("price_change_percentage_24h", {})
+                if isinstance(pct_24h, dict):
+                    symbol_price_change = pct_24h.get("usd")
+                break
+
+        if symbol_trending:
+            bias = "bullish"  # Trending = positive attention
+            title = f"{internal} coingecko TRENDING rank #{symbol_rank} (high interest)"
+            if symbol_price_change is not None:
+                title += f" chg={symbol_price_change:+.2f}%"
+            items.append(NewsItem(
+                title=title,
+                published_at=now,
+                source="coingecko-trending",
+                url=None
+            ))
+
+        # Check trending categories for relevant signals
+        trending_categories = trending_data.get("categories", [])
+        for cat in trending_categories[:3]:  # Top 3 categories
+            cat_name = cat.get("name", "")
+            cat_change = cat.get("data", {}).get("market_cap_change_percentage_24h", {})
+            usd_change = cat_change.get("usd") if isinstance(cat_change, dict) else None
+            
+            # Check if category is relevant to our symbol
+            cat_lower = cat_name.lower()
+            base_lower = base.lower()
+            
+            relevance = False
+            if base_lower in cat_lower:
+                relevance = True
+            elif base == "SOL" and "solana" in cat_lower:
+                relevance = True
+            elif base == "ETH" and "ethereum" in cat_lower:
+                relevance = True
+            elif base == "BTC" and "bitcoin" in cat_lower:
+                relevance = True
+            elif "meme" in cat_lower and base in ["DOGE", "SHIB"]:
+                relevance = True
+
+            if relevance:
+                bias = "bullish" if (usd_change and usd_change > 0) else "bearish"
+                title = f"{internal} category '{cat_name}' trending ({bias})"
+                if usd_change:
+                    title += f" mktcap_chg={usd_change:+.2f}%"
+                items.append(NewsItem(
+                    title=title,
+                    published_at=now,
+                    source="coingecko-trending",
+                    url=None
+                ))
+        
+        # If no direct relevance, add general market sentiment from top trending coins
+        if not items and trending_coins:
+            top_movers = []
+            for coin_wrapper in trending_coins[:5]:
+                coin = coin_wrapper.get("item", {})
+                coin_name = coin.get("name", "")
+                coin_symbol = coin.get("symbol", "")
+                price_data = coin.get("data", {})
+                pct_24h = price_data.get("price_change_percentage_24h", {})
+                usd_change = pct_24h.get("usd") if isinstance(pct_24h, dict) else None
+                if usd_change is not None:
+                    top_movers.append((coin_symbol.upper(), usd_change))
+            
+            if top_movers:
+                avg_change = sum(c[1] for c in top_movers) / len(top_movers)
+                market_bias = "bullish" if avg_change > 0 else "bearish"
+                title = f"{internal} coingecko market sentiment {market_bias} (top5 avg={avg_change:+.2f}%)"
+                items.append(NewsItem(
+                    title=title,
+                    published_at=now,
+                    source="coingecko-trending",
+                    url=None
+                ))
+
+        return items[:limit]
+
+
+@dataclass
+class CoinGeckoMomentumProvider:
+    
+
+    def fetch_latest(self, symbol: str, limit: int = 5) -> List[NewsItem]:
+        try:
+            from auraquant.data.coingecko_client import CoinGeckoClient, WEEX_BASE_TO_COINGECKO_ID
+        except Exception as e:
+            raise RuntimeError("CoinGecko client unavailable") from e
+
+        internal = symbol if "/" in symbol else f"{symbol}/USDT"
+        base = internal.split("/")[0].upper().strip()
+        cid = WEEX_BASE_TO_COINGECKO_ID.get(base)
+        if not cid:
+            return []
+
+        ttl_seconds = float(os.getenv("COINGECKO_SENTIMENT_TTL_SECONDS", "300"))
+        threshold_pct = float(os.getenv("COINGECKO_SENTIMENT_THRESHOLD_PCT", "0.3"))
+
+        client = CoinGeckoClient()
+        markets = client.get_markets(vs_currency="usd", ids=[cid], ttl_seconds=ttl_seconds)
+        if not markets:
+            return []
+
+        m = markets[0]
+        chg_pct = float(m.price_change_percentage_24h or 0.0)
+
+        bias = "flat"
+        if chg_pct > threshold_pct:
+            bias = "bullish"
+        elif chg_pct < -threshold_pct:
+            bias = "bearish"
+
+        now = datetime.utcnow()
+        titles = [
+            f"{internal} coingecko 24h momentum {bias} (chg={chg_pct:+.2f}%)",
+            f"{internal} coingecko market snapshot (id={m.id})",
+        ]
+        items = [
+            NewsItem(title=t, published_at=now, source="coingecko", url=None)
+            for t in titles
+        ]
+        return items[:limit]
+
+
+@dataclass
+class ChainNewsProvider:
+    """Chains multiple news providers with automatic fallback.
+    
+    Tries providers in order until one returns non-empty results.
+    Use case: CryptoPanic (limited quota) -> CoinGecko Trending -> Momentum fallback
+    """
+
+    providers: List[NewsProvider]
+
+    def fetch_latest(self, symbol: str, limit: int = 5) -> List[NewsItem]:
+        for provider in self.providers:
+            try:
+                items = provider.fetch_latest(symbol=symbol, limit=limit)
+                if items:  # Got results, stop chain
+                    return items
+            except Exception:
+                # Provider failed, continue to next
+                continue
+        return []  # All providers exhausted
+
+
+def create_default_news_provider() -> NewsProvider:
+    """Factory function to create the default news provider chain.
+    
+    Chain order:
+    1. CryptoPanic (real news, but 7 calls/day limit)
+    2. CoinGecko Trending (trending coins/categories sentiment)
+    3. CoinGecko Momentum (24h price momentum as synthetic news)
+    """
+    providers: List[NewsProvider] = []
+    
+    # Primary: CryptoPanic (if API token available)
+    try:
+        cp = CryptoPanicProvider()
+        if cp.api_token:
+            providers.append(cp)
+    except Exception:
+        pass
+    
+    # Secondary: CoinGecko Trending (requires API key for reliable access)
+    cg_api_key = os.getenv("COINGECKO_API_KEY")
+    if cg_api_key:
+        providers.append(CoinGeckoTrendingProvider())
+    
+    # Tertiary: CoinGecko Momentum (always available as fallback)
+    providers.append(CoinGeckoMomentumProvider())
+    
+    if len(providers) == 1:
+        return providers[0]
+    
+    return ChainNewsProvider(providers=providers)

@@ -1,7 +1,15 @@
 """Sentiment layer (Layer A) for AuraQuant."""
 
 from .sentiment_processor import SentimentProcessor
-from .providers import NewsProvider, CryptoPanicProvider, StaticNewsProvider
+from .providers import (
+    NewsProvider,
+    CryptoPanicProvider,
+    StaticNewsProvider,
+    CoinGeckoTrendingProvider,
+    CoinGeckoMomentumProvider,
+    ChainNewsProvider,
+    create_default_news_provider,
+)
 from .types import NewsItem, SentimentReport, MarketBias
 
 __all__ = [
@@ -9,6 +17,10 @@ __all__ = [
     "NewsProvider",
     "CryptoPanicProvider",
     "StaticNewsProvider",
+    "CoinGeckoTrendingProvider",
+    "CoinGeckoMomentumProvider",
+    "ChainNewsProvider",
+    "create_default_news_provider",
     "NewsItem",
     "SentimentReport",
     "MarketBias",
