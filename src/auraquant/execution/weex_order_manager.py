@@ -74,8 +74,9 @@ class WeexOrderManager(BaseOrderManager):
         self.default_leverage = max(1, min(int(default_leverage), 20))
         self.margin_mode = int(margin_mode)
 
+        # Enable preset SL/TP by default - sends SL/TP to exchange so they trigger server-side
 
-        self.use_preset_sltp = os.getenv("WEEX_USE_PRESET_SLTP", "0") == "1"
+        self.use_preset_sltp = os.getenv("WEEX_USE_PRESET_SLTP", "1") == "1"
 
         self._starting_equity: Optional[float] = None
         self._equity: float = 0.0
@@ -485,8 +486,9 @@ class WeexOrderManager(BaseOrderManager):
 
             if not has_open:
                 if self._position is not None:
-                    logger.info("[WEEX] No active position found. Clearing local state.")
+                    logger.info("[WEEX] No active position found. Clearing local state and incrementing trades_closed.")
                     self._position.is_open = False
+                    self._trades_closed += 1  # Increment when position is confirmed closed
                     self._position = None
                 return True
 
@@ -551,6 +553,16 @@ class WeexOrderManager(BaseOrderManager):
         self._equity = float(equity)
         if self._starting_equity is None:
             self._starting_equity = float(equity)
+
+        # Also sync position state from exchange to detect server-side SL/TP closes
+        # This is crucial when WEEX_USE_PRESET_SLTP=1 (exchange handles SL/TP)
+        if self._position is not None and self._position.is_open:
+            weex_symbol = self._position.weex_symbol
+            if weex_symbol:
+                try:
+                    self._sync_position_from_weex(weex_symbol=weex_symbol)
+                except Exception as e:
+                    logger.debug(f"[WEEX] Position sync during reconcile failed: {e}")
 
     def available_margin(self) -> float:
         """Get available margin for new positions.

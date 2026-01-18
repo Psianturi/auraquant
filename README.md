@@ -62,7 +62,20 @@ cp .env.example .env
 Edit `.env` with your credentials:
 - WEEX API credentials (API key, secret, passphrase)
 - CryptoPanic API token for news sentiment
+- CoinGecko API key for market data fallback
 - Google Gemini API key for NLP analysis (optional)
+
+### API Testing (Required for Competition Entry)
+
+**Competition Requirement:** Execute a ~10 USDT trade on `cmt_btcusdt` via API.
+
+```bash
+# Dry-run (verify API connectivity without placing orders)
+python src/test_weex_real.py --log-file ai_logs/weex_api_test.log
+
+# Execute the required API test trade (~10 USDT on BTC)
+WEEX_EXECUTE_ORDER=1 python src/test_weex_real.py --log-file ai_logs/weex_api_test_exec.log
+```
 
 ### Running the System
 
@@ -71,19 +84,18 @@ Edit `.env` with your credentials:
 python src/demo_orchestrator.py
 ```
 
+**Live WEEX Trading (VPS Recommended):**
+```bash
+# Set required env vars
+export WEEX_EXECUTE_ORDER=1
+export ENABLE_LEARNER=1
+
+python src/auraquant_orchestrator.py --duration 600 --min-trades 4 --symbols BTC/USDT,ETH/USDT,SOL/USDT
+```
+
 **Test WEEX API Connection:**
 ```bash
 python src/test_weex_real.py
-```
-
-**Test CryptoPanic News Integration:**
-```bash
-python src/cryptopanic_tester.py
-```
-
-**Mock Trading Simulation:**
-```bash
-python src/mock_weex_tester.py
 ```
 
 ### System Validation
@@ -93,6 +105,25 @@ python src/system_validation.py
 ```
 
 This will run comprehensive tests on all components and generate performance reports.
+
+## Position Management & SL/TP
+
+**How positions are closed:**
+
+1. **Preset SL/TP (Default):** When `WEEX_USE_PRESET_SLTP=1` (default), SL/TP orders are sent to WEEX exchange with the opening order. The exchange handles closing automatically when price hits SL/TP.
+
+2. **Local Monitoring (Fallback):** When `WEEX_USE_PRESET_SLTP=0`, the bot monitors price locally via `on_price_tick()` and sends market close orders when SL/TP is hit. This requires the bot to be continuously running.
+
+3. **Max Hold Timeout:** Positions held longer than `MAX_HOLD_SECONDS` (default: 180s) are closed via best-effort market order.
+
+4. **No Single-Position Close Endpoint:** WEEX doesn't have a dedicated single-position close endpoint. Closing is done via `placeOrder` with type=3 (close long) or type=4 (close short).
+
+**Environment Variables:**
+```bash
+WEEX_USE_PRESET_SLTP=1          # Send SL/TP to exchange (recommended)
+MAX_HOLD_SECONDS=180            # Force-close after N seconds
+WEEX_CLOSE_RETRY_COOLDOWN_SECONDS=60  # Cooldown between close retries
+```
 
 ## Project Structure
 
