@@ -563,7 +563,7 @@ else:
                     )
                     ai_log_store.append(event)
                     if ai_log_uploader:
-                        ai_log_uploader.upload(event.to_dict())
+                        ai_log_uploader.upload(event.to_payload())
                     print(f"[AI LOG] Order decision logged")
                 else:
                     print(f"[FAILED] {resp.text}")
@@ -585,7 +585,7 @@ else:
                     )
                     ai_log_store.append(event)
                     if ai_log_uploader:
-                        ai_log_uploader.upload(event.to_dict())
+                        ai_log_uploader.upload(event.to_payload())
             except Exception as e:
                 print(f"[ERROR] {e}")
                 # Log error
@@ -606,7 +606,7 @@ else:
                 )
                 ai_log_store.append(event)
                 if ai_log_uploader:
-                    ai_log_uploader.upload(event.to_dict())
+                    ai_log_uploader.upload(event.to_payload())
 
         if i < TRADE_REPEAT - 1 and TRADE_SLEEP_SECONDS > 0:
             time.sleep(TRADE_SLEEP_SECONDS)
