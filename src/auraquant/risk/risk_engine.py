@@ -181,7 +181,7 @@ class RiskEngine:
 
     max_leverage_allowed: float = 20.0
     risk_per_trade_pct: float = 0.4  
-    max_position_notional_pct: float = 5.0  # Allow 2+ positions simultaneously
+    max_position_notional_pct: float = 4.5
 
     sl_atr_mult: float = 2.0  # Breathing room to avoid premature stop-out
     tp_atr_mult: float = 2.5  # R:R = 1.25:1, profitable with 45% win rate
