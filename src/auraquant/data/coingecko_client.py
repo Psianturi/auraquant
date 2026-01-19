@@ -290,16 +290,19 @@ class CoinGeckoClient:
             else:
                 result["trend"] = "sideways"
             
-            block_threshold = float(os.getenv("TREND_BLOCK_THRESHOLD_PCT", "3.0"))
+            block_threshold = float(os.getenv("TREND_BLOCK_THRESHOLD_PCT", "5.0")) 
             
             if change_24h < -block_threshold:
                 result["allow_long"] = False
             if change_24h > block_threshold:
                 result["allow_short"] = False
             
-
+            # Allow reversal trades based on 1h momentum
             if change_24h < -block_threshold and change_1h > 1.5:
                 result["allow_long"] = True  # Potential reversal
+            
+            if change_1h < -1.0:  # 1h drop > 1%
+                result["allow_short"] = True  # Short-term momentum reversal
             
             # Get global market data for regime
             try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -48,8 +49,9 @@ class SentimentProcessor:
     provider: NewsProvider
 
     half_life_minutes: float = 30.0
-    long_threshold: float = 0.35
-    short_threshold: float = -0.35
+
+    long_threshold: float = field(default_factory=lambda: float(os.getenv("SENTIMENT_LONG_THRESHOLD", "0.28")))
+    short_threshold: float = field(default_factory=lambda: float(os.getenv("SENTIMENT_SHORT_THRESHOLD", "-0.18")))
 
     # News caching for live trading (TTL-based refresh)
     news_cache_ttl_minutes: float = 10.0  # Recommended: 10 min for CryptoPanic free tier

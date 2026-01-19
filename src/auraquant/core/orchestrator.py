@@ -231,7 +231,49 @@ class Orchestrator:
         if self.execution.position() is not None:
             return None
 
-        if report.bias == "NEUTRAL":
+
+        effective_bias = report.bias
+        use_momentum_override = os.getenv("USE_MOMENTUM_OVERRIDE", "1") == "1"
+        if use_momentum_override and report.bias == "NEUTRAL":
+            try:
+                cg_client = CoinGeckoClient()
+                trend_data = cg_client.get_market_trend_filter(tick.symbol, ttl_seconds=180.0)
+                change_1h = float(trend_data.get("change_1h", 0.0))
+                
+                # If 1h drop > 0.8%, override to SHORT
+                if change_1h < -0.8:
+                    effective_bias = "SHORT"
+                    payload = {
+                        "module": "Orchestrator",
+                        "timestamp": utc_iso(tick.now),
+                        "phase": BotPhase.QUALIFY.value,
+                        "symbol": tick.symbol,
+                        "event": "MOMENTUM_OVERRIDE",
+                        "original_bias": report.bias,
+                        "new_bias": "SHORT",
+                        "change_1h": round(change_1h, 2),
+                        "why": "1h momentum drop triggered SHORT override",
+                    }
+                    log_json(self.logger, payload, level=logging.INFO)
+                # If 1h gain > 0.8%, override to LONG
+                elif change_1h > 0.8:
+                    effective_bias = "LONG"
+                    payload = {
+                        "module": "Orchestrator",
+                        "timestamp": utc_iso(tick.now),
+                        "phase": BotPhase.QUALIFY.value,
+                        "symbol": tick.symbol,
+                        "event": "MOMENTUM_OVERRIDE",
+                        "original_bias": report.bias,
+                        "new_bias": "LONG",
+                        "change_1h": round(change_1h, 2),
+                        "why": "1h momentum gain triggered LONG override",
+                    }
+                    log_json(self.logger, payload, level=logging.INFO)
+            except Exception:
+                pass  # Keep original bias on error
+
+        if effective_bias == "NEUTRAL":
             return None
 
         # Anti-spam entry guard
@@ -240,7 +282,7 @@ class Orchestrator:
             if delta < self.config.min_entry_interval_seconds:
                 return None
 
-        signal = self.correlation.generate(bias=report.bias, symbol=tick.symbol, prices=self.prices, now=tick.now)
+        signal = self.correlation.generate(bias=effective_bias, symbol=tick.symbol, prices=self.prices, now=tick.now)
         if signal is None:
             return None
 
