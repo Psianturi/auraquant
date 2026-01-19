@@ -97,48 +97,39 @@ class GeminiScorer:
                     )
                 )
                 
-                logger.debug(f"[GeminiScorer] Raw response type: {type(response)}")
-                logger.debug(f"[GeminiScorer] Response attrs: {dir(response)}")
-                
                 text = None
                 
                 # Method 1: Direct .text attribute
                 try:
                     if hasattr(response, 'text'):
                         text = response.text
-                        logger.debug(f"[GeminiScorer] Method 1 got text: {bool(text)}")
+                        if text:
+                            logger.info(f"[GeminiScorer] Got text via .text")
                 except Exception as e:
-                    logger.debug(f"[GeminiScorer] Method 1 error: {e}")
+                    logger.info(f"[GeminiScorer] .text error: {e}")
                 
-                # Method 2: Access via candidates[0].content.parts[0].text
+                # Method 2: Access via candidates
                 if not text and hasattr(response, 'candidates') and response.candidates:
                     try:
                         candidate = response.candidates[0]
-                        logger.debug(f"[GeminiScorer] Candidate: {candidate}")
+                        finish_reason = getattr(candidate, 'finish_reason', None)
+                        logger.info(f"[GeminiScorer] finish_reason={finish_reason}")
+                        
                         if hasattr(candidate, 'content') and candidate.content:
                             parts = getattr(candidate.content, 'parts', [])
-                            logger.debug(f"[GeminiScorer] Parts count: {len(parts) if parts else 0}")
                             if parts and len(parts) > 0:
                                 text = getattr(parts[0], 'text', None)
-                                logger.debug(f"[GeminiScorer] Method 2 got text: {bool(text)}")
+                                if text:
+                                    logger.info(f"[GeminiScorer] Got text via candidates")
                     except Exception as e:
-                        logger.debug(f"[GeminiScorer] Method 2 error: {e}")
-                
-                # Method 3: Try string conversion
-                if not text:
-                    try:
-                        raw_str = str(response)
-                        if len(raw_str) > 50 and '{' in raw_str:
-                            # Might contain JSON
-                            logger.debug(f"[GeminiScorer] Method 3 raw: {raw_str[:200]}")
-                    except Exception:
-                        pass
+                        logger.info(f"[GeminiScorer] candidates error: {e}")
                 
                 if text:
-                    logger.info(f"[GeminiScorer] Gemini response: {text[:150]}...")
+                    logger.info(f"[GeminiScorer] Response: {text[:80]}...")
                     return text.strip()
                 else:
-                    logger.info(f"[GeminiScorer] Empty response, fallback to heuristic")
+                    has_cands = hasattr(response, 'candidates') and bool(response.candidates)
+                    logger.info(f"[GeminiScorer] No text, has_candidates={has_cands}")
                     return None
             else:
                 # Old SDK: google.generativeai
