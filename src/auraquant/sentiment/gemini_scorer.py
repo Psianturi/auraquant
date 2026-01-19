@@ -44,7 +44,7 @@ class GeminiScorer:
     _response_cache: Dict[str, Tuple[float, str]] = field(default_factory=dict, init=False, repr=False)
     _cache_ttl_seconds: float = field(default=45.0, init=False)  
     _last_call_time: float = field(default=0.0, init=False)
-    _min_call_interval: float = field(default=2.5, init=False) 
+    _min_call_interval: float = field(default=3.0, init=False) 
     
     def __post_init__(self) -> None:
         if self.api_key is None:

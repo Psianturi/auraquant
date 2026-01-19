@@ -379,9 +379,29 @@ class Orchestrator:
             confidence = float(min(max(confidence * (0.5 + 0.5 * p), 0.0), 1.0))
             self._qualified_features_by_symbol[tick.symbol] = fv
         if confidence < self.config.min_confidence:
+            payload = {
+                "module": "Orchestrator",
+                "timestamp": utc_iso(tick.now),
+                "phase": BotPhase.QUALIFY.value,
+                "symbol": tick.symbol,
+                "deny": "CONFIDENCE_TOO_LOW",
+                "confidence": round(confidence, 4),
+                "min_confidence": self.config.min_confidence,
+            }
+            log_json(self.logger, payload, level=logging.WARNING)
             return None
 
         if tick.atr < self.config.min_atr:
+            payload = {
+                "module": "Orchestrator",
+                "timestamp": utc_iso(tick.now),
+                "phase": BotPhase.QUALIFY.value,
+                "symbol": tick.symbol,
+                "deny": "ATR_TOO_LOW",
+                "atr": round(tick.atr, 6),
+                "min_atr": self.config.min_atr,
+            }
+            log_json(self.logger, payload, level=logging.WARNING)
             return None
 
         intent = TradeIntent(
