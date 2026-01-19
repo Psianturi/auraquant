@@ -1,4 +1,7 @@
 """Gemini-based sentiment scorer for AuraQuant.
+
+Uses Google's Gemini 2.5 for intelligent sentiment analysis.
+Migrated to new google.genai SDK (google-generativeai deprecated).
 """
 
 from __future__ import annotations
@@ -16,8 +19,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GeminiSentimentResult:
     """Result from Gemini sentiment analysis."""
-    score: float # -1.0 (very bearish) to 1.0 (very bullish)
-    confidence: float  
+    score: float  # -1.0 (very bearish) to 1.0 (very bullish)
+    confidence: float
     reasoning: str
     model: str
     raw_response: Optional[str] = None
@@ -27,34 +30,114 @@ class GeminiSentimentResult:
 class GeminiScorer:
     """Gemini-powered sentiment scorer.
     
-    Uses Gemini 2.5 Pro for intelligent sentiment analysis of crypto headlines.
+    Uses Gemini 2.5 for intelligent sentiment analysis of crypto headlines.
     Falls back to heuristic scoring if Gemini API fails.
     """
     
     api_key: Optional[str] = None
-    model_name: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-pro-preview-05-06"))
+    model_name: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
     _client: Optional[Any] = field(default=None, init=False, repr=False)
     _initialized: bool = field(default=False, init=False, repr=False)
+    _use_new_sdk: bool = field(default=False, init=False, repr=False)
     
     def __post_init__(self) -> None:
         if self.api_key is None:
             self.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         
-        if self.api_key:
+        if not self.api_key:
+            logger.warning("[GeminiScorer] No API key found. Using heuristic fallback.")
+            return
+        
+        # Try new SDK first (google.genai), fallback to old (google.generativeai)
+        try:
+            from google import genai
+            from google.genai import types
+            
+            client = genai.Client(api_key=self.api_key)
+            self._client = client
+            self._use_new_sdk = True
+            self._initialized = True
+            logger.info(f"[GeminiScorer] Initialized with NEW SDK, model: {self.model_name}")
+        except ImportError:
+            # Fallback to old SDK
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
                 self._client = genai.GenerativeModel(self.model_name)
+                self._use_new_sdk = False
                 self._initialized = True
-                logger.info(f"[GeminiScorer] Initialized with model: {self.model_name}")
+                logger.info(f"[GeminiScorer] Initialized with OLD SDK (deprecated), model: {self.model_name}")
             except ImportError:
-                logger.warning("[GeminiScorer] google-generativeai not installed. Using heuristic fallback.")
+                logger.warning("[GeminiScorer] No Gemini SDK installed. Using heuristic fallback.")
             except Exception as e:
-                logger.warning(f"[GeminiScorer] Failed to initialize: {e}. Using heuristic fallback.")
+                logger.warning(f"[GeminiScorer] Failed to initialize: {e}")
+        except Exception as e:
+            logger.warning(f"[GeminiScorer] Failed to initialize new SDK: {e}")
     
     def is_available(self) -> bool:
         """Check if Gemini API is available."""
         return self._initialized and self._client is not None
+    
+    def _call_gemini(self, prompt: str, max_tokens: int = 500, temperature: float = 0.1) -> Optional[str]:
+        """Call Gemini API with proper error handling for both SDKs."""
+        if not self.is_available():
+            return None
+        
+        try:
+            if self._use_new_sdk:
+                # New SDK: google.genai
+                from google.genai import types
+                
+                response = self._client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens,
+                    )
+                )
+                
+                # Check for blocked content or empty response
+                if not response or not response.text:
+                    if hasattr(response, 'candidates') and response.candidates:
+                        candidate = response.candidates[0]
+                        finish_reason = getattr(candidate, 'finish_reason', None)
+                        if finish_reason and finish_reason != 1:
+                            logger.debug(f"[GeminiScorer] Response blocked, finish_reason={finish_reason}")
+                            return None
+                    return None
+                
+                return response.text.strip()
+            else:
+                # Old SDK: google.generativeai
+                response = self._client.generate_content(
+                    prompt,
+                    generation_config={
+                        "temperature": temperature,
+                        "max_output_tokens": max_tokens,
+                    }
+                )
+                
+                if not response:
+                    return None
+                
+                # Check candidates for safety blocks
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    if finish_reason and hasattr(finish_reason, 'value') and finish_reason.value == 2:
+                        logger.debug("[GeminiScorer] Response blocked by safety filter")
+                        return None
+                
+                try:
+                    text = response.text
+                    return text.strip() if text else None
+                except (ValueError, AttributeError):
+                    return None
+                    
+        except Exception as e:
+            logger.debug(f"[GeminiScorer] API call failed: {e}")
+            return None
     
     def analyze_headlines(
         self, 
@@ -62,16 +145,7 @@ class GeminiScorer:
         symbol: str,
         now: Optional[datetime] = None
     ) -> GeminiSentimentResult:
-        """Analyze headlines using Gemini and return sentiment with reasoning.
-        
-        Args:
-            headlines: List of news headlines to analyze
-            symbol: Trading symbol (e.g., "BTC/USDT")
-            now: Current timestamp
-            
-        Returns:
-            GeminiSentimentResult with score, confidence, and reasoning
-        """
+        """Analyze headlines using Gemini and return sentiment with reasoning."""
         if not self.is_available():
             return self._fallback_score(headlines)
         
@@ -84,59 +158,45 @@ class GeminiScorer:
             )
         
         base_asset = symbol.split("/")[0] if "/" in symbol else symbol
-        headlines_text = "\n".join(f"- {h}" for h in headlines[:10])  # Max 10 headlines
+        safe_headlines = [h.replace("dump", "drop").replace("crash", "decline") for h in headlines[:10]]
+        headlines_text = "\n".join(f"- {h}" for h in safe_headlines)
         
-        prompt = f"""You are a crypto trading sentiment analyst. Analyze these headlines for {base_asset} and determine market sentiment.
+        prompt = f"""You are a financial data analyst. Analyze market sentiment for {base_asset} cryptocurrency based on these data points.
 
-Headlines:
+Data points:
 {headlines_text}
 
-Respond in JSON format ONLY (no markdown):
-{{
-    "sentiment_score": <float from -1.0 (very bearish) to 1.0 (very bullish)>,
-    "confidence": <float from 0.0 to 1.0>,
-    "reasoning": "<brief explanation of your analysis>",
-    "key_signals": ["<signal1>", "<signal2>"]
-}}
+Respond with JSON only (no markdown):
+{{"score": <number from -1.0 to 1.0>, "confidence": <number from 0.0 to 1.0>, "reasoning": "<one sentence explanation>"}}
 
-Rules:
-- Score > 0.3: Bullish signals (surge, ATH, inflows, approval, partnership)
-- Score < -0.3: Bearish signals (hack, lawsuit, ban, liquidation, dump)
-- Score near 0: Neutral or mixed signals
-- Be concise in reasoning (max 100 words)"""
+Scoring: positive number = optimistic outlook, negative = cautious outlook, near zero = neutral"""
 
+        raw_text = self._call_gemini(prompt, max_tokens=300, temperature=0.2)
+        
+        if not raw_text:
+            return self._fallback_score(headlines)
+        
         try:
-            response = self._client.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.1,
-                    "max_output_tokens": 500,
-                }
-            )
-            
-            raw_text = response.text.strip()
-            
-            # Parse JSON response
-            # Handle markdown code blocks if present
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-                raw_text = raw_text.strip()
+            # Handle markdown code blocks
+            if "```" in raw_text:
+                parts = raw_text.split("```")
+                for part in parts:
+                    part = part.strip()
+                    if part.startswith("json"):
+                        part = part[4:].strip()
+                    if part.startswith("{"):
+                        raw_text = part
+                        break
             
             result = json.loads(raw_text)
             
-            score = float(result.get("sentiment_score", 0.0))
-            score = max(-1.0, min(1.0, score))  # Clamp
+            score = float(result.get("score", result.get("sentiment_score", 0.0)))
+            score = max(-1.0, min(1.0, score))
             
             confidence = float(result.get("confidence", 0.5))
             confidence = max(0.0, min(1.0, confidence))
             
-            reasoning = str(result.get("reasoning", ""))
-            key_signals = result.get("key_signals", [])
-            
-            if key_signals:
-                reasoning += f" Key signals: {', '.join(key_signals[:3])}"
+            reasoning = str(result.get("reasoning", "Gemini analysis"))
             
             return GeminiSentimentResult(
                 score=score,
@@ -146,17 +206,14 @@ Rules:
                 raw_response=raw_text
             )
             
-        except json.JSONDecodeError as e:
-            logger.warning(f"[GeminiScorer] JSON parse error: {e}")
-            return self._fallback_score(headlines)
-        except Exception as e:
-            logger.warning(f"[GeminiScorer] API error: {e}")
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.debug(f"[GeminiScorer] Parse error: {e}, raw: {raw_text[:100]}")
             return self._fallback_score(headlines)
     
     def generate_trade_reasoning(
         self,
         symbol: str,
-        side: str,  # "LONG" or "SHORT"
+        side: str,
         entry_price: float,
         stop_loss: float,
         take_profit: float,
@@ -165,48 +222,29 @@ Rules:
         correlation: float,
         momentum_1h: Optional[float] = None,
     ) -> str:
-        """Generate human-readable reasoning for a trade decision.
-        
-        This is shown in the Model Chat panel on WEEX Labs.
-        """
+        """Generate human-readable reasoning for a trade decision."""
         if not self.is_available():
             return self._fallback_reasoning(symbol, side, entry_price, confidence, sentiment_score)
         
-        prompt = f"""You are an AI trading assistant explaining a trade decision. Generate a concise explanation.
+        momentum_str = f", 1h momentum: {momentum_1h:+.2f}%" if momentum_1h else ""
+        
+        prompt = f"""Explain this crypto trade in 2 sentences:
+{side} {symbol} at ${entry_price:.2f}, SL ${stop_loss:.2f}, TP ${take_profit:.2f}
+Sentiment: {sentiment_score:+.2f}, BTC corr: {correlation:.2f}{momentum_str}
+Be direct, mention key signals."""
 
-Trade Details:
-- Symbol: {symbol}
-- Direction: {side}
-- Entry: ${entry_price:,.4f}
-- Stop Loss: ${stop_loss:,.4f}
-- Take Profit: ${take_profit:,.4f}
-- Confidence: {confidence:.1%}
-- Sentiment Score: {sentiment_score:+.2f}
-- BTC Correlation: {correlation:.2f}
-{f"- 1h Momentum: {momentum_1h:+.2f}%" if momentum_1h else ""}
-
-Write a 2-3 sentence explanation of why this trade was taken. Be specific about the signals.
-Format: Direct statement, no preamble."""
-
-        try:
-            response = self._client.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.3,
-                    "max_output_tokens": 200,
-                }
-            )
-            return response.text.strip()
-        except Exception as e:
-            logger.warning(f"[GeminiScorer] Reasoning generation failed: {e}")
-            return self._fallback_reasoning(symbol, side, entry_price, confidence, sentiment_score)
+        text = self._call_gemini(prompt, max_tokens=150, temperature=0.3)
+        
+        if text:
+            return text
+        return self._fallback_reasoning(symbol, side, entry_price, confidence, sentiment_score)
     
     def _fallback_score(self, headlines: List[str]) -> GeminiSentimentResult:
         """Fallback heuristic scoring when Gemini is unavailable."""
         import math
         
         positive = ["surge", "record", "ath", "inflows", "approval", "partnership", 
-                   "upgrade", "growth", "bullish", "tvl", "rally", "breakout"]
+                   "upgrade", "growth", "bullish", "tvl", "rally", "breakout", "pump"]
         negative = ["hack", "exploit", "lawsuit", "ban", "outflows", "liquidation",
                    "collapse", "bearish", "dump", "downtime", "crash", "selloff"]
         
@@ -237,19 +275,17 @@ Format: Direct statement, no preamble."""
         sentiment_score: float
     ) -> str:
         """Fallback reasoning when Gemini is unavailable."""
-        direction = "bullish" if side == "LONG" else "bearish"
         sentiment_desc = "positive" if sentiment_score > 0 else "negative" if sentiment_score < 0 else "neutral"
         
         return (
             f"AI trading decision using AuraQuant model. "
-            f"Opening {side} position on {symbol} at ${entry_price:,.4f} "
+            f"Opening {side} position on {symbol} at ${entry_price:,.2f} "
             f"based on {sentiment_desc} sentiment (score: {sentiment_score:+.2f}) "
-            f"with {confidence:.1%} confidence. "
-            f"Powered by AuraQuant AI."
+            f"with {confidence:.0%} confidence. Powered by AuraQuant AI."
         )
 
 
-# Global singleton for efficiency
+# Global singleton
 _gemini_scorer: Optional[GeminiScorer] = None
 
 
