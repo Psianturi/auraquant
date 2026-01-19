@@ -174,10 +174,12 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
         raw_text = self._call_gemini(prompt, max_tokens=300, temperature=0.2)
         
         if not raw_text:
+            logger.info(f"[GeminiScorer] No response, using heuristic fallback")
             return self._fallback_score(headlines)
         
         try:
-            # Handle markdown code blocks
+            logger.debug(f"[GeminiScorer] Raw response: {raw_text[:200]}")
+            
             if "```" in raw_text:
                 parts = raw_text.split("```")
                 for part in parts:
@@ -198,6 +200,8 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
             
             reasoning = str(result.get("reasoning", "Gemini analysis"))
             
+            logger.info(f"[GeminiScorer] Success: score={score:.2f}, reasoning={reasoning[:50]}")
+            
             return GeminiSentimentResult(
                 score=score,
                 confidence=confidence,
@@ -207,7 +211,7 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
             )
             
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.debug(f"[GeminiScorer] Parse error: {e}, raw: {raw_text[:100]}")
+            logger.warning(f"[GeminiScorer] Parse error: {e}, raw: {raw_text[:100]}")
             return self._fallback_score(headlines)
     
     def generate_trade_reasoning(
