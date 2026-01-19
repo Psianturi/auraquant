@@ -173,8 +173,8 @@ class WeexOrderManager(BaseOrderManager):
         }
 
         if self.use_preset_sltp:
-            body["presetTakeProfitPrice"] = str(float(take_profit))
-            body["presetStopLossPrice"] = str(float(stop_loss))
+            body["presetTakeProfitPrice"] = self._format_price(take_profit, symbol)
+            body["presetStopLossPrice"] = self._format_price(stop_loss, symbol)
 
         resp = self.client.signed_post("/capi/v2/order/placeOrder", body)
         if resp.status_code != 200:
@@ -723,6 +723,29 @@ class WeexOrderManager(BaseOrderManager):
     def _format_size(self, size: float) -> str:
         s = f"{float(size):.8f}".rstrip("0").rstrip(".")
         return s if s else "0"
+
+    def _format_price(self, price: float, symbol: str = "") -> str:
+        """Format price with appropriate decimal places per symbol."""
+        p = float(price)
+        sym_lower = symbol.lower()
+        # Determine decimal places based on price magnitude and symbol
+        if "btc" in sym_lower or p >= 1000:
+            # BTC, BNB: 1-2 decimals
+            decimals = 2 if p < 10000 else 1
+        elif "eth" in sym_lower or p >= 100:
+            # ETH, SOL, LTC: 2 decimals
+            decimals = 2
+        elif p >= 1:
+            # XRP: 4 decimals
+            decimals = 4
+        elif p >= 0.01:
+            # DOGE, ADA: 5 decimals
+            decimals = 5
+        else:
+            # Very small prices: 6 decimals
+            decimals = 6
+        formatted = f"{p:.{decimals}f}"
+        return formatted
 
     def _pnl_proxy(self, pos: WeexLivePosition, exit_price: float) -> float:
         entry = max(float(pos.entry_price), 1e-12)
