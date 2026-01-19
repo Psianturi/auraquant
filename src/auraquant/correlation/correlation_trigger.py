@@ -100,15 +100,23 @@ class CorrelationTrigger:
 
         corr, lag = _best_lag_corr(lead_rets, tgt_rets, self.max_lag)
         strength = abs(float(corr))
+        
 
-        positive_corr = float(corr) >= float(self.corr_threshold)
-        allowed = positive_corr
+        if bias == "LONG":
+            allowed = float(corr) >= float(self.corr_threshold)
+            why_msg = (
+                "Positive correlation confirmed" if allowed 
+                else f"Correlation {corr:.4f} below threshold (need >= {self.corr_threshold})"
+            )
+        else:  
+            # For SHORT: accept if |corr| >= threshold (strong relationship either direction)
+            allowed = strength >= float(self.corr_threshold)
+            why_msg = (
+                f"Strong correlation ({corr:.4f}) confirmed for SHORT" if allowed 
+                else f"Correlation strength {strength:.4f} below threshold (need >= {self.corr_threshold})"
+            )
+        
         side = "LONG" if bias == "LONG" else "SHORT"
-
-        why_msg = (
-            "Positive correlation confirmed" if allowed 
-            else f"Correlation {corr:.4f} below threshold (need >= {self.corr_threshold})"
-        )
 
         payload = {
             "module": "CorrelationTrigger",
