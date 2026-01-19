@@ -262,9 +262,9 @@ class AutonomousOrchestratorTest:
         
         risk.circuit_breaker.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", "1"))
         try:
-            risk.max_position_notional_pct = float(os.getenv("MAX_POSITION_NOTIONAL_PCT", "4.5"))
+            risk.max_position_notional_pct = float(os.getenv("MAX_POSITION_NOTIONAL_PCT", "4.0"))
         except Exception:
-            risk.max_position_notional_pct = 4.5
+            risk.max_position_notional_pct = 4.0
         risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.85"))  
         risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.75"))
         client = WeexPrivateRestClient()

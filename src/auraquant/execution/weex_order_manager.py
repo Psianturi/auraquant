@@ -104,7 +104,20 @@ class WeexOrderManager(BaseOrderManager):
         except Exception:
             self._assets_sync_backoff_max_seconds = 60.0
 
+        self._cleanup_stale_orders_on_start()
+        
         self.reconcile(now=datetime.utcnow())
+    
+    def _cleanup_stale_orders_on_start(self) -> None:
+        """Cancel all pending orders on startup to free locked margin."""
+        cleanup_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "LTC/USDT", "BNB/USDT"]
+        logger.info("[WEEX] 🧹 Cleaning up stale orders on startup...")
+        for symbol in cleanup_symbols:
+            try:
+                weex_symbol = self._resolve_weex_symbol(symbol)
+                self._cancel_all_orders(weex_symbol)
+            except Exception as e:
+                logger.debug(f"[WEEX] Cleanup {symbol} skipped: {e}")
 
     def starting_equity(self) -> float:
         return float(self._starting_equity if self._starting_equity is not None else self._equity)

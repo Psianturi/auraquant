@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,11 @@ class GeminiScorer:
     _client: Optional[Any] = field(default=None, init=False, repr=False)
     _initialized: bool = field(default=False, init=False, repr=False)
     _use_new_sdk: bool = field(default=False, init=False, repr=False)
+    # Cache to avoid rate limits - {cache_key: (timestamp, result)}
+    _response_cache: Dict[str, Tuple[float, str]] = field(default_factory=dict, init=False, repr=False)
+    _cache_ttl_seconds: float = field(default=45.0, init=False)  
+    _last_call_time: float = field(default=0.0, init=False)
+    _min_call_interval: float = field(default=2.5, init=False) 
     
     def __post_init__(self) -> None:
         if self.api_key is None:
@@ -78,11 +84,53 @@ class GeminiScorer:
         """Check if Gemini API is available."""
         return self._initialized and self._client is not None
     
+    def _get_cache_key(self, prompt: str) -> str:
+        """Generate cache key from prompt (use first 100 chars + length)."""
+        return f"{prompt[:100]}_{len(prompt)}"
+    
     def _call_gemini(self, prompt: str, max_tokens: int = 1020, temperature: float = 0.1) -> Optional[str]:
-        """Call Gemini API with proper error handling for both SDKs."""
+  
         if not self.is_available():
             return None
         
+        cache_key = self._get_cache_key(prompt)
+        now = time.time()
+        if cache_key in self._response_cache:
+            cached_time, cached_result = self._response_cache[cache_key]
+            if now - cached_time < self._cache_ttl_seconds:
+                logger.info(f"[GeminiScorer] Using cached response (age: {now - cached_time:.1f}s)")
+                return cached_result
+        
+        # Throttle: wait if called too recently
+        time_since_last = now - self._last_call_time
+        if time_since_last < self._min_call_interval:
+            wait_time = self._min_call_interval - time_since_last
+            logger.debug(f"[GeminiScorer] Throttling, wait {wait_time:.1f}s")
+            time.sleep(wait_time)
+        
+        self._last_call_time = time.time()
+        
+        # Try up to 2 times with backoff on 429
+        for attempt in range(2):
+            try:
+                result = self._call_gemini_internal(prompt, max_tokens, temperature)
+                if result:
+                    # Cache successful response
+                    self._response_cache[cache_key] = (time.time(), result)
+                    return result
+                elif attempt == 0:
+                    # First attempt failed (possibly 429), wait and retry
+                    logger.info(f"[GeminiScorer] Retry after 3s backoff...")
+                    time.sleep(3.0)
+            except Exception as e:
+                logger.debug(f"[GeminiScorer] Attempt {attempt+1} error: {e}")
+                if attempt == 0:
+                    time.sleep(3.0)
+        
+        return None
+    
+    def _call_gemini_internal(self, prompt: str, max_tokens: int, temperature: float) -> Optional[str]:
+        """Internal API call without caching/retry logic."""
         try:
             if self._use_new_sdk:
                 # New SDK: google.genai
