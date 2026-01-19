@@ -265,8 +265,8 @@ class AutonomousOrchestratorTest:
             risk.max_position_notional_pct = float(os.getenv("MAX_POSITION_NOTIONAL_PCT", "4.5"))
         except Exception:
             risk.max_position_notional_pct = 4.5
-        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.6"))  
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.8"))
+        risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.85"))  
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.75"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 

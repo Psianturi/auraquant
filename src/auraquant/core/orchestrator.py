@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from ..data.multi_price_provider import MultiPriceProvider
+from ..data.coingecko_client import CoinGeckoClient
 from ..correlation import CorrelationTrigger
 from ..risk import RiskEngine, TradeIntent
 from ..sentiment import SentimentProcessor
@@ -241,6 +243,43 @@ class Orchestrator:
         signal = self.correlation.generate(bias=report.bias, symbol=tick.symbol, prices=self.prices, now=tick.now)
         if signal is None:
             return None
+
+        # 24h Trend Filter - Block entries against strong trends
+        use_trend_filter = os.getenv("USE_TREND_FILTER", "1") == "1"
+        if use_trend_filter:
+            try:
+                cg_client = CoinGeckoClient()
+                trend_data = cg_client.get_market_trend_filter(tick.symbol, ttl_seconds=180.0)
+                
+                if signal.side == "LONG" and not trend_data.get("allow_long", True):
+                    payload = {
+                        "module": "Orchestrator",
+                        "timestamp": utc_iso(tick.now),
+                        "phase": BotPhase.QUALIFY.value,
+                        "symbol": tick.symbol,
+                        "deny": "TREND_FILTER_BLOCKED_LONG",
+                        "trend": trend_data.get("trend"),
+                        "change_24h": round(trend_data.get("change_24h", 0), 2),
+                        "market_regime": trend_data.get("market_regime"),
+                    }
+                    log_json(self.logger, payload, level=logging.WARNING)
+                    return None
+                
+                if signal.side == "SHORT" and not trend_data.get("allow_short", True):
+                    payload = {
+                        "module": "Orchestrator",
+                        "timestamp": utc_iso(tick.now),
+                        "phase": BotPhase.QUALIFY.value,
+                        "symbol": tick.symbol,
+                        "deny": "TREND_FILTER_BLOCKED_SHORT",
+                        "trend": trend_data.get("trend"),
+                        "change_24h": round(trend_data.get("change_24h", 0), 2),
+                        "market_regime": trend_data.get("market_regime"),
+                    }
+                    log_json(self.logger, payload, level=logging.WARNING)
+                    return None
+            except Exception:
+                pass  # On error, allow entry (fail open)
 
         if self.ai_log_store is not None:
             self.ai_log_store.append(

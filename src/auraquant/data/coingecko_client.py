@@ -26,6 +26,11 @@ class CoinGeckoMarket:
     market_cap: Optional[float]
     total_volume: Optional[float]
     price_change_percentage_24h: Optional[float]
+    price_change_percentage_1h: Optional[float]
+    high_24h: Optional[float]
+    low_24h: Optional[float]
+    ath: Optional[float]
+    ath_change_percentage: Optional[float]
     last_updated: Optional[str]
 
     @classmethod
@@ -38,6 +43,11 @@ class CoinGeckoMarket:
             market_cap=float(obj["market_cap"]) if obj.get("market_cap") is not None else None,
             total_volume=float(obj["total_volume"]) if obj.get("total_volume") is not None else None,
             price_change_percentage_24h=float(obj["price_change_percentage_24h"]) if obj.get("price_change_percentage_24h") is not None else None,
+            price_change_percentage_1h=float(obj["price_change_percentage_1h_in_currency"]) if obj.get("price_change_percentage_1h_in_currency") is not None else None,
+            high_24h=float(obj["high_24h"]) if obj.get("high_24h") is not None else None,
+            low_24h=float(obj["low_24h"]) if obj.get("low_24h") is not None else None,
+            ath=float(obj["ath"]) if obj.get("ath") is not None else None,
+            ath_change_percentage=float(obj["ath_change_percentage"]) if obj.get("ath_change_percentage") is not None else None,
             last_updated=str(obj.get("last_updated")) if obj.get("last_updated") is not None else None,
         )
 
@@ -157,7 +167,7 @@ class CoinGeckoClient:
             "per_page": int(per_page),
             "page": 1,
             "sparkline": "false",
-            "price_change_percentage": "24h",
+            "price_change_percentage": "1h,24h",
         }
 
         assert self.session is not None
@@ -194,6 +204,133 @@ class CoinGeckoClient:
 
         self.cache.set_json(cache_key, data)
         return data
+
+    def get_global(self, ttl_seconds: float = 300.0) -> Dict[str, Any]:
+        """Fetch /global for total market cap, BTC dominance, etc.
+        """
+        cache_key = "global_data"
+        
+        assert self.cache is not None
+        cached = self.cache.get_json(cache_key, ttl_seconds=float(ttl_seconds))
+        if isinstance(cached, dict):
+            return cached
+
+        url = f"{self.base_url}/global"
+        
+        assert self.session is not None
+        resp = self.session.get(url, headers=self._headers(), timeout=float(self.timeout_seconds))
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("Unexpected CoinGecko global response")
+
+        self.cache.set_json(cache_key, data)
+        return data
+
+    def get_market_trend_filter(
+        self,
+        symbol: str,
+        ttl_seconds: float = 180.0,
+    ) -> Dict[str, Any]:
+        """Analyze 24h trend to determine if entry is safe.
+        
+        Returns:
+            {
+                "allow_long": bool,
+                "allow_short": bool,
+                "trend": "uptrend" | "downtrend" | "sideways",
+                "change_24h": float,
+                "change_1h": float,
+                "volatility_24h": float,  # (high-low)/price as percentage
+                "btc_dominance": float,
+                "market_regime": "risk_on" | "risk_off" | "neutral"
+            }
+        """
+        # Parse symbol to get base asset
+        base = symbol.replace("/USDT", "").replace("USDT", "").upper().strip()
+        cid = WEEX_BASE_TO_COINGECKO_ID.get(base)
+        
+        result = {
+            "allow_long": True,
+            "allow_short": True,
+            "trend": "sideways",
+            "change_24h": 0.0,
+            "change_1h": 0.0,
+            "volatility_24h": 0.0,
+            "btc_dominance": 0.0,
+            "market_regime": "neutral",
+        }
+        
+        if not cid:
+            return result
+        
+        try:
+            markets = self.get_markets(vs_currency="usd", ids=[cid], ttl_seconds=ttl_seconds)
+            if not markets:
+                return result
+            
+            m = markets[0]
+            change_24h = float(m.price_change_percentage_24h or 0.0)
+            change_1h = float(m.price_change_percentage_1h or 0.0)
+            
+            # Calculate 24h volatility
+            high = float(m.high_24h or m.current_price)
+            low = float(m.low_24h or m.current_price)
+            price = float(m.current_price or 1.0)
+            volatility = ((high - low) / price) * 100.0 if price > 0 else 0.0
+            
+            result["change_24h"] = change_24h
+            result["change_1h"] = change_1h
+            result["volatility_24h"] = volatility
+            
+            if change_24h > 2.0:
+                result["trend"] = "uptrend"
+            elif change_24h < -2.0:
+                result["trend"] = "downtrend"
+            else:
+                result["trend"] = "sideways"
+            
+            block_threshold = float(os.getenv("TREND_BLOCK_THRESHOLD_PCT", "3.0"))
+            
+            if change_24h < -block_threshold:
+                result["allow_long"] = False
+            if change_24h > block_threshold:
+                result["allow_short"] = False
+            
+
+            if change_24h < -block_threshold and change_1h > 1.5:
+                result["allow_long"] = True  # Potential reversal
+            
+            # Get global market data for regime
+            try:
+                global_data = self.get_global(ttl_seconds=ttl_seconds)
+                data = global_data.get("data", {})
+                
+                btc_dom = float(data.get("market_cap_percentage", {}).get("btc", 0.0))
+                total_mcap_change = float(data.get("market_cap_change_percentage_24h_usd", 0.0))
+                
+                result["btc_dominance"] = btc_dom
+                
+                # Market regime detection
+                # Risk-on: total market up, BTC dominance stable/down (altcoins gaining)
+                # Risk-off: total market down, BTC dominance up (flight to BTC)
+                if total_mcap_change > 2.0 and btc_dom < 55.0:
+                    result["market_regime"] = "risk_on"
+                elif total_mcap_change < -2.0 or btc_dom > 60.0:
+                    result["market_regime"] = "risk_off"
+                else:
+                    result["market_regime"] = "neutral"
+                
+                if result["market_regime"] == "risk_off" and base not in ["BTC", "ETH"]:
+                    if change_24h < 0:
+                        result["allow_long"] = False
+            except Exception:
+                pass  
+                
+        except Exception:
+            pass 
+        
+        return result
 
 
 WEEX_BASE_TO_COINGECKO_ID: Dict[str, str] = {
