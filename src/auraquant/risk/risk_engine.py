@@ -184,7 +184,8 @@ class RiskEngine:
     max_position_notional_pct: float = 4.5
 
     sl_atr_mult: float = 2.0  # Breathing room to avoid premature stop-out
-    tp_atr_mult: float = 2.5  # R:R = 1.25:1, profitable with 45% win rate
+    tp_atr_mult: float = 4.0  # R:R = 2:1, profitable with 35% win rate
+    min_atr_pct: float = 0.003  
 
     def validate_intent(self, intent_data: TradeIntent, equity_now: float, now: Optional[datetime] = None) -> RiskDecision:
         now = now or datetime.utcnow()
@@ -283,6 +284,15 @@ class RiskEngine:
 
     def calculate_sl_tp(self, entry_price: float, side: Side, volatility: float) -> Tuple[float, float]:
         atr = max(float(volatility), 0.0)
+        
+        # CRITICAL: Enforce minimum ATR as percentage of price
+        # This prevents micro-scalping where fee > profit
+        # 0.3% minimum ensures TP distance > 2x typical fee (0.06% x 2 = 0.12%)
+        min_atr_abs = float(entry_price) * float(self.min_atr_pct)
+        
+        if atr < min_atr_abs:
+            atr = min_atr_abs
+        
         if atr == 0.0:
             # Fallback: 0.5% price-based bands if ATR missing
             atr = float(entry_price) * 0.005
