@@ -78,7 +78,7 @@ class GeminiScorer:
         """Check if Gemini API is available."""
         return self._initialized and self._client is not None
     
-    def _call_gemini(self, prompt: str, max_tokens: int = 500, temperature: float = 0.1) -> Optional[str]:
+    def _call_gemini(self, prompt: str, max_tokens: int = 1020, temperature: float = 0.1) -> Optional[str]:
         """Call Gemini API with proper error handling for both SDKs."""
         if not self.is_available():
             return None
@@ -194,7 +194,7 @@ Respond with JSON only (no markdown):
 
 Scoring: positive number = optimistic outlook, negative = cautious outlook, near zero = neutral"""
 
-        raw_text = self._call_gemini(prompt, max_tokens=300, temperature=0.2)
+        raw_text = self._call_gemini(prompt, max_tokens=510, temperature=0.2)
         
         if not raw_text:
             logger.info(f"[GeminiScorer] No response, using heuristic fallback")
@@ -260,7 +260,7 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
 Sentiment: {sentiment_score:+.2f}, BTC corr: {correlation:.2f}{momentum_str}
 Be direct, mention key signals."""
 
-        text = self._call_gemini(prompt, max_tokens=150, temperature=0.3)
+        text = self._call_gemini(prompt, max_tokens=256, temperature=0.3)
         
         if text:
             return text
