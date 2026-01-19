@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ..util.jsonlog import log_json, utc_iso
 from .providers import NewsProvider
 from .types import MarketBias, NewsItem, SentimentReport
+from .gemini_scorer import get_gemini_scorer, GeminiSentimentResult
 
 
 def _normalize_text(text: str) -> str:
@@ -33,14 +34,15 @@ class SentimentProcessor:
     MVP:
     - Fetch latest N items from a NewsProvider
     - Deduplicate by title/url hash
-    - Score each item using a transparent heuristic (keyword-based)
+    - Score each item using Gemini AI (with heuristic fallback)
     - Apply half-life decay and aggregate into a single score
     - Map score into LONG/SHORT/NEUTRAL
     - Emit JSON evidence logs
 
     Live trading features:
     - News caching with TTL (default 10 min) to avoid API spam
-    - Fallback to NEUTRAL if provider fails
+    - Gemini 2.5 Pro for intelligent sentiment analysis
+    - Fallback to heuristic when Gemini unavailable
 
     You can later swap the scorer to an LLM and keep everything else intact.
     """
@@ -57,6 +59,8 @@ class SentimentProcessor:
     news_cache_ttl_minutes: float = 10.0  # Recommended: 10 min for CryptoPanic free tier
     _news_cache: Dict[str, List[NewsItem]] = field(default_factory=dict, init=False, repr=False)
     _cache_updated_at: Dict[str, datetime] = field(default_factory=dict, init=False, repr=False)
+    
+    _last_gemini_result: Optional[GeminiSentimentResult] = field(default=None, init=False, repr=False)
 
     # Fallback behavior when provider fails
     fallback_on_error: MarketBias = "NEUTRAL"
@@ -68,6 +72,60 @@ class SentimentProcessor:
         raw_items = self._get_news_with_cache(symbol=symbol, limit=limit, now=now)
         items = self._deduplicate(raw_items)
 
+        use_gemini = os.getenv("USE_GEMINI_SENTIMENT", "1") == "1"
+        gemini_result: Optional[GeminiSentimentResult] = None
+        
+        if use_gemini and items:
+            try:
+                scorer = get_gemini_scorer()
+                if scorer.is_available():
+                    headlines = [item.title for item in items]
+                    gemini_result = scorer.analyze_headlines(headlines, symbol, now)
+                    self._last_gemini_result = gemini_result
+                    
+                    if gemini_result.model != "heuristic-fallback":
+                    
+                        agg_score = gemini_result.score
+                        bias = self._score_to_bias(agg_score)
+                        
+                        avg_age = 0.0
+                        if items:
+                            avg_age = sum(max((now - i.published_at).total_seconds() / 60.0, 0.0) for i in items) / len(items)
+                        
+                        top_headline = items[0].title if items else None
+                        
+                        payload = {
+                            "module": "SentimentProcessor",
+                            "timestamp": utc_iso(now),
+                            "symbol": symbol,
+                            "bias": bias,
+                            "score": round(float(agg_score), 4),
+                            "model": gemini_result.model,
+                            "reasoning": gemini_result.reasoning,
+                            "confidence": round(gemini_result.confidence, 4),
+                            "evidence": {
+                                "news_count": len(items),
+                                "avg_age_mins": round(float(avg_age), 2),
+                                "top_headline": top_headline,
+                                "scorer": "gemini",
+                            },
+                        }
+                        log_json(self.logger, payload, level=logging.INFO)
+                        
+                        return SentimentReport(
+                            symbol=symbol,
+                            bias=bias,
+                            score=float(agg_score),
+                            news_count=len(items),
+                            avg_age_mins=float(avg_age),
+                            top_headline=top_headline,
+                            decay_applied=f"Gemini-{gemini_result.model}",
+                            evidence_json=payload,
+                        )
+            except Exception as e:
+                self.logger.warning(f"[SentimentProcessor] Gemini analysis failed: {e}")
+
+        # Fallback to heuristic scoring
         scored: List[Tuple[NewsItem, float, float]] = []
         # tuple: (item, sentiment_score[-1..1], weight)
         for item in items:

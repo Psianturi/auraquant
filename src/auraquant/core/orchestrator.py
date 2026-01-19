@@ -183,6 +183,14 @@ class Orchestrator:
         self._last_scan_report = report
         self._last_scan_symbol = tick.symbol
         
+        gemini_reasoning = None
+        gemini_model = "AuraQuant.SentimentHeuristic"
+        if hasattr(self.sentiment, '_last_gemini_result') and self.sentiment._last_gemini_result:
+            gr = self.sentiment._last_gemini_result
+            if gr.model != "heuristic-fallback":
+                gemini_reasoning = gr.reasoning
+                gemini_model = f"AuraQuant.Gemini.{gr.model}"
+        
         payload = {
             "module": "Orchestrator",
             "timestamp": utc_iso(tick.now),
@@ -191,17 +199,19 @@ class Orchestrator:
             "price": tick.last_price,
             "atr": tick.atr,
             "sentiment": {"bias": report.bias, "score": round(report.score, 4)},
+            "gemini_reasoning": gemini_reasoning,
         }
         log_json(self.logger, payload, level=logging.INFO)
 
         if self.ai_log_store is not None:
+            explanation = gemini_reasoning if gemini_reasoning else "Heuristic sentiment scoring with dedup + half-life decay."
             self.ai_log_store.append(
                 AiLogEvent(
                     stage=BotPhase.SCAN.value,
-                    model="AuraQuant.SentimentHeuristic",
+                    model=gemini_model,
                     input={"symbol": tick.symbol, "limit": 5, "price": tick.last_price},
                     output={"bias": report.bias, "score": round(report.score, 6)},
-                    explanation="Heuristic sentiment scoring with dedup + half-life decay.",
+                    explanation=explanation[:1000], 
                     timestamp=tick.now,
                 )
             )
