@@ -97,17 +97,49 @@ class GeminiScorer:
                     )
                 )
                 
-                # Check for blocked content or empty response
-                if not response or not response.text:
-                    if hasattr(response, 'candidates') and response.candidates:
-                        candidate = response.candidates[0]
-                        finish_reason = getattr(candidate, 'finish_reason', None)
-                        if finish_reason and finish_reason != 1:
-                            logger.debug(f"[GeminiScorer] Response blocked, finish_reason={finish_reason}")
-                            return None
-                    return None
+                logger.debug(f"[GeminiScorer] Raw response type: {type(response)}")
+                logger.debug(f"[GeminiScorer] Response attrs: {dir(response)}")
                 
-                return response.text.strip()
+                text = None
+                
+                # Method 1: Direct .text attribute
+                try:
+                    if hasattr(response, 'text'):
+                        text = response.text
+                        logger.debug(f"[GeminiScorer] Method 1 got text: {bool(text)}")
+                except Exception as e:
+                    logger.debug(f"[GeminiScorer] Method 1 error: {e}")
+                
+                # Method 2: Access via candidates[0].content.parts[0].text
+                if not text and hasattr(response, 'candidates') and response.candidates:
+                    try:
+                        candidate = response.candidates[0]
+                        logger.debug(f"[GeminiScorer] Candidate: {candidate}")
+                        if hasattr(candidate, 'content') and candidate.content:
+                            parts = getattr(candidate.content, 'parts', [])
+                            logger.debug(f"[GeminiScorer] Parts count: {len(parts) if parts else 0}")
+                            if parts and len(parts) > 0:
+                                text = getattr(parts[0], 'text', None)
+                                logger.debug(f"[GeminiScorer] Method 2 got text: {bool(text)}")
+                    except Exception as e:
+                        logger.debug(f"[GeminiScorer] Method 2 error: {e}")
+                
+                # Method 3: Try string conversion
+                if not text:
+                    try:
+                        raw_str = str(response)
+                        if len(raw_str) > 50 and '{' in raw_str:
+                            # Might contain JSON
+                            logger.debug(f"[GeminiScorer] Method 3 raw: {raw_str[:200]}")
+                    except Exception:
+                        pass
+                
+                if text:
+                    logger.info(f"[GeminiScorer] Gemini response: {text[:150]}...")
+                    return text.strip()
+                else:
+                    logger.info(f"[GeminiScorer] Empty response, fallback to heuristic")
+                    return None
             else:
                 # Old SDK: google.generativeai
                 response = self._client.generate_content(
