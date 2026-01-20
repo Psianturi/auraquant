@@ -33,6 +33,12 @@ class WeexLivePosition:
     order_id: Optional[str] = None
     size: float = 0.0
     weex_symbol: Optional[str] = None
+    # Trailing stop state
+    original_stop_loss: Optional[float] = None
+    breakeven_activated: bool = False  # True once SL moved to breakeven
+    trailing_activated: bool = False  # True once trailing mode active
+    highest_price: Optional[float] = None  # Track best price for trailing (LONG)
+    lowest_price: Optional[float] = None  # Track best price for trailing (SHORT)
 
 
 class WeexOrderManager(BaseOrderManager):
@@ -68,10 +74,23 @@ class WeexOrderManager(BaseOrderManager):
 
         if default_leverage is None:
             try:
-                default_leverage = int(os.getenv("WEEX_LEVERAGE", "2"))
+                default_leverage = int(os.getenv("WEEX_LEVERAGE", "10"))
             except Exception:
-                default_leverage = 2
+                default_leverage = 10
         self.default_leverage = max(1, min(int(default_leverage), 20))
+        
+        try:
+            self.breakeven_trigger_pct = float(os.getenv("BREAKEVEN_TRIGGER_PCT", "0.005"))  # 0.5%
+        except Exception:
+            self.breakeven_trigger_pct = 0.005
+        try:
+            self.trailing_trigger_pct = float(os.getenv("TRAILING_TRIGGER_PCT", "0.008"))  # 0.8%
+        except Exception:
+            self.trailing_trigger_pct = 0.008
+        try:
+            self.trailing_distance_pct = float(os.getenv("TRAILING_DISTANCE_PCT", "0.004"))  # 0.4%
+        except Exception:
+            self.trailing_distance_pct = 0.004
         self.margin_mode = int(margin_mode)
 
         # Enable preset SL/TP by default - sends SL/TP to exchange so they trigger server-side
@@ -210,6 +229,12 @@ class WeexOrderManager(BaseOrderManager):
             order_id=str(order_id) if order_id is not None else None,
             size=float(size),
             weex_symbol=weex_symbol,
+            # Initialize trailing stop state
+            original_stop_loss=float(stop_loss),
+            breakeven_activated=False,
+            trailing_activated=False,
+            highest_price=float(entry_price) if side == "LONG" else None,
+            lowest_price=float(entry_price) if side == "SHORT" else None,
         )
         self._position = pos
         self._positions_opened += 1
@@ -221,6 +246,9 @@ class WeexOrderManager(BaseOrderManager):
             return None
 
         price = float(price)
+        
+        self._update_trailing_stop(pos, price)
+        
         hit_tp = False
         hit_sl = False
         if pos.side == "LONG":
@@ -253,6 +281,88 @@ class WeexOrderManager(BaseOrderManager):
         pos.is_open = False
         self._trades_closed += 1
         return TradeResult(symbol=pos.symbol, pnl_usdt=float(pnl), closed_at=now, order_id=pos.order_id)
+
+    def _update_trailing_stop(self, pos: WeexLivePosition, current_price: float) -> None:
+      
+        entry = pos.entry_price
+        current_price = float(current_price)
+        
+        if pos.side == "LONG":
+            # Track highest price
+            if pos.highest_price is None or current_price > pos.highest_price:
+                pos.highest_price = current_price
+            
+            price_move_pct = (current_price - entry) / entry
+            best_move_pct = (pos.highest_price - entry) / entry if pos.highest_price else 0.0
+            
+            # Step 1: Breakeven activation (0.5% profit)
+            if not pos.breakeven_activated and price_move_pct >= self.breakeven_trigger_pct:
+                # Move SL to breakeven (entry price + small buffer for fees ~0.05%)
+                breakeven_sl = entry * 1.0005  # Tiny buffer above entry
+                if breakeven_sl > pos.stop_loss:
+                    logger.info(
+                        f"[TRAILING] {pos.symbol} LONG: Breakeven activated @ {current_price:.4f} "
+                        f"(moved +{price_move_pct*100:.2f}%). SL: {pos.stop_loss:.4f} -> {breakeven_sl:.4f}"
+                    )
+                    pos.stop_loss = breakeven_sl
+                    pos.breakeven_activated = True
+            
+            # Step 2: Trailing activation (0.8% profit)
+            if not pos.trailing_activated and best_move_pct >= self.trailing_trigger_pct:
+                logger.info(
+                    f"[TRAILING] {pos.symbol} LONG: Trailing mode activated @ best={pos.highest_price:.4f} "
+                    f"(moved +{best_move_pct*100:.2f}%)"
+                )
+                pos.trailing_activated = True
+            
+            # Step 3: Trail the stop loss
+            if pos.trailing_activated and pos.highest_price:
+                # New SL = highest price - trailing distance
+                new_sl = pos.highest_price * (1 - self.trailing_distance_pct)
+                if new_sl > pos.stop_loss:
+                    logger.info(
+                        f"[TRAILING] {pos.symbol} LONG: Trailing SL updated. "
+                        f"Best={pos.highest_price:.4f}, SL: {pos.stop_loss:.4f} -> {new_sl:.4f}"
+                    )
+                    pos.stop_loss = new_sl
+        
+        else:  # SHORT
+            # Track lowest price
+            if pos.lowest_price is None or current_price < pos.lowest_price:
+                pos.lowest_price = current_price
+            
+            price_move_pct = (entry - current_price) / entry
+            best_move_pct = (entry - pos.lowest_price) / entry if pos.lowest_price else 0.0
+            
+            # Step 1: Breakeven activation (0.5% profit)
+            if not pos.breakeven_activated and price_move_pct >= self.breakeven_trigger_pct:
+                breakeven_sl = entry * 0.9995  # Tiny buffer below entry
+                if breakeven_sl < pos.stop_loss:
+                    logger.info(
+                        f"[TRAILING] {pos.symbol} SHORT: Breakeven activated @ {current_price:.4f} "
+                        f"(moved +{price_move_pct*100:.2f}%). SL: {pos.stop_loss:.4f} -> {breakeven_sl:.4f}"
+                    )
+                    pos.stop_loss = breakeven_sl
+                    pos.breakeven_activated = True
+            
+            # Step 2: Trailing activation (0.8% profit)
+            if not pos.trailing_activated and best_move_pct >= self.trailing_trigger_pct:
+                logger.info(
+                    f"[TRAILING] {pos.symbol} SHORT: Trailing mode activated @ best={pos.lowest_price:.4f} "
+                    f"(moved +{best_move_pct*100:.2f}%)"
+                )
+                pos.trailing_activated = True
+            
+            # Step 3: Trail the stop loss
+            if pos.trailing_activated and pos.lowest_price:
+                # New SL = lowest price + trailing distance
+                new_sl = pos.lowest_price * (1 + self.trailing_distance_pct)
+                if new_sl < pos.stop_loss:
+                    logger.info(
+                        f"[TRAILING] {pos.symbol} SHORT: Trailing SL updated. "
+                        f"Best={pos.lowest_price:.4f}, SL: {pos.stop_loss:.4f} -> {new_sl:.4f}"
+                    )
+                    pos.stop_loss = new_sl
 
     def close_open_position_best_effort(self) -> bool:
         """Attempt to close the currently tracked open position.

@@ -181,11 +181,14 @@ class RiskEngine:
 
     max_leverage_allowed: float = 20.0
     risk_per_trade_pct: float = 0.4  
-    max_position_notional_pct: float = 4.5
+    max_position_notional_pct: float = 4.0  
 
-    sl_atr_mult: float = 2.0  # Breathing room to avoid premature stop-out
-    tp_atr_mult: float = 4.0  # R:R = 2:1, profitable with 35% win rate
+    sl_atr_mult: float = 2.0  
+    tp_atr_mult: float = 4.0  
     min_atr_pct: float = 0.003  
+    
+    # Sideways market filter - skip trading when volatility is too low
+    min_atr_for_trade_pct: float = 0.002  
 
     def validate_intent(self, intent_data: TradeIntent, equity_now: float, now: Optional[datetime] = None) -> RiskDecision:
         now = now or datetime.utcnow()
@@ -195,6 +198,32 @@ class RiskEngine:
             self._state_loaded = True
 
         self.circuit_breaker.set_day_start_equity_if_missing(equity_now, now)
+
+        atr_pct = float(intent_data.atr) / float(intent_data.entry_price) if float(intent_data.entry_price) > 0 else 0.0
+        if atr_pct < self.min_atr_for_trade_pct:
+            payload = {
+                "module": "RiskEngine",
+                "timestamp": utc_iso(now),
+                "symbol": intent_data.symbol,
+                "decision": "DENIED",
+                "reason": "MARKET_TOO_SIDEWAYS",
+                "metrics": {
+                    "atr_pct": atr_pct,
+                    "min_atr_for_trade_pct": self.min_atr_for_trade_pct,
+                    "atr": float(intent_data.atr),
+                    "entry_price": float(intent_data.entry_price),
+                },
+            }
+            log_json(self.logger, payload, level=logging.WARNING)
+            return RiskDecision(
+                allowed=False,
+                decision="DENIED",
+                reason=f"Market too sideways (ATR {atr_pct*100:.3f}% < min {self.min_atr_for_trade_pct*100:.1f}%)",
+                symbol=intent_data.symbol,
+                side=intent_data.side,
+                entry_price=float(intent_data.entry_price),
+                evidence_json=payload,
+            )
 
         allow, cb_reason, cb_metrics = self.circuit_breaker.evaluate(equity_now, now)
         if not allow:
