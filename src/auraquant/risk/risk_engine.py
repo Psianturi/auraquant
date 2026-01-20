@@ -185,7 +185,7 @@ class RiskEngine:
 
     sl_atr_mult: float = 2.0  
     tp_atr_mult: float = 4.0  
-    min_atr_pct: float = 0.003  
+    min_atr_pct: float = 0.0035 
     
     # Sideways market filter - skip trading when volatility is too low
     min_atr_for_trade_pct: float = 0.002  
