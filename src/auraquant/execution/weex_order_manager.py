@@ -506,14 +506,22 @@ class WeexOrderManager(BaseOrderManager):
     
     def _cancel_all_orders(self, weex_symbol: str) -> None:
         """Cancel all pending orders for a symbol to prevent 40015 conflicts."""
-        body = {"symbol": weex_symbol}
+        #  docs: POST /capi/v2/order/cancelAllOrders
+        body = {"symbol": weex_symbol, "cancelOrderType": "normal"}
         try:
-            resp = self.client.signed_post("/capi/v2/order/cancelAll", body)
+            resp = self.client.signed_post("/capi/v2/order/cancelAllOrders", body)
             if resp.status_code == 200:
                 logger.info(f"[WEEX] Cancelled pending orders for {weex_symbol}")
             else:
                 # 404 or no orders is fine
                 logger.debug(f"[WEEX] Cancel orders response: {resp.status_code}")
+                if resp.status_code in (400, 404):
+                    try:
+                        legacy = self.client.signed_post("/capi/v2/order/cancelAll", {"symbol": weex_symbol})
+                        if legacy.status_code == 200:
+                            logger.info(f"[WEEX] Cancelled pending orders for {weex_symbol} (legacy endpoint)")
+                    except Exception as e:
+                        logger.debug(f"[WEEX] Legacy cancelAll exception: {e}")
         except Exception as e:
             logger.debug(f"[WEEX] Cancel orders exception: {e}")
 

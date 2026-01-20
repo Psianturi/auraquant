@@ -6,6 +6,8 @@ import logging
 import os
 import sys
 import time
+import atexit
+import signal
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +34,7 @@ from auraquant.util.ai_log.realtime_uploader import make_uploader_from_env
 
 from auraquant.weex.private_client import WeexPrivateRestClient
 from auraquant.weex.symbols import to_weex_contract_symbol
+from auraquant.weex.emergency_close import emergency_close
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +45,64 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+PIDFILE_PATH = REPO_ROOT / "runtime_cache" / "orchestrator.pid"
+
+
+def _write_pidfile() -> None:
+    PIDFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PIDFILE_PATH.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def _remove_pidfile() -> None:
+    try:
+        if PIDFILE_PATH.exists():
+            PIDFILE_PATH.unlink()
+    except Exception:
+        pass
+
+
+def _stop_running_bot_best_effort(timeout_seconds: float = 5.0) -> bool:
+    """Stop a previously started runner instance (best-effort).
+
+    Uses a pidfile written by this runner during normal runs.
+    """
+    try:
+        if not PIDFILE_PATH.exists():
+            return False
+        raw = PIDFILE_PATH.read_text(encoding="utf-8").strip()
+        if not raw:
+            return False
+        pid = int(raw)
+        if pid <= 0 or pid == os.getpid():
+            return False
+
+        try:
+            os.kill(pid, 0)
+        except Exception:
+            return False
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            return False
+
+        deadline = time.time() + float(timeout_seconds)
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except Exception:
+                return True
+            time.sleep(0.1)
+
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
 
 
 @dataclass
@@ -566,6 +627,11 @@ def main():
         description="AuraQuant orchestrator real-time runner (with AI logging)"
     )
     parser.add_argument(
+        "--emergency-close",
+        action="store_true",
+        help="Stop any running bot (via pidfile), disable Gemini calls, and force close positions/cancel orders, then exit.",
+    )
+    parser.add_argument(
         "--duration",
         type=int,
         default=900,
@@ -606,7 +672,30 @@ def main():
     else:
         symbols = [s.strip() for s in str(args.symbols).split(",") if s.strip()]
 
+    if args.emergency_close:
+        # Ensure we do not call Gemini while emergency handling.
+        os.environ["DISABLE_GEMINI_API"] = "1"
+        os.environ["USE_GEMINI_SENTIMENT"] = "0"
+
+        stopped = _stop_running_bot_best_effort(timeout_seconds=8.0)
+        logger.warning(f"[EMERGENCY] stop_running_bot={stopped} pidfile={str(PIDFILE_PATH)}")
+
+        client = WeexPrivateRestClient()
+        client.require_env()
+        weex_symbols = [to_weex_contract_symbol(s) for s in symbols]
+        result = emergency_close(client=client, weex_symbols=weex_symbols, sleep_seconds=2.0)
+        remaining = result.get("remaining_positions") or []
+
+        if remaining:
+            logger.error(f"[EMERGENCY] Remaining positions after close: {remaining}")
+            raise SystemExit(2)
+
+        logger.warning("[EMERGENCY] OK: no open positions remain (per API)")
+        raise SystemExit(0)
+
     try:
+        _write_pidfile()
+        atexit.register(_remove_pidfile)
         test = AutonomousOrchestratorTest(
             symbols=symbols,
             duration_seconds=args.duration,

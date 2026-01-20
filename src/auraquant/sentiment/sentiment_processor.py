@@ -68,11 +68,11 @@ class SentimentProcessor:
     def analyze(self, symbol: str, limit: int = 5, now: Optional[datetime] = None) -> SentimentReport:
         now = now or datetime.utcnow()
 
-        # Use cached news if within TTL, otherwise fetch fresh
         raw_items = self._get_news_with_cache(symbol=symbol, limit=limit, now=now)
         items = self._deduplicate(raw_items)
 
-        use_gemini = os.getenv("USE_GEMINI_SENTIMENT", "1") == "1"
+        disable_gemini = os.getenv("DISABLE_GEMINI_API", "0") == "1"
+        use_gemini = (os.getenv("USE_GEMINI_SENTIMENT", "1") == "1") and (not disable_gemini)
         gemini_result: Optional[GeminiSentimentResult] = None
         
         if use_gemini and items:
