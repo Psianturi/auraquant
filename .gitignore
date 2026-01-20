@@ -22,6 +22,9 @@ ai_logs/
 # Runtime cache (CoinGecko snapshots, etc.)
 runtime_cache/
 
+# Generated offline policy (created by scripts/analyze_ai_log.py)
+models/offline_policy.json
+
 # Local VPS helper scripts (keep local; do not commit)
 scripts/vps_*.sh
 

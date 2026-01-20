@@ -27,7 +27,7 @@ from auraquant.risk.risk_engine import RiskEngine
 from auraquant.sentiment.providers import CoinGeckoMomentumProvider, CoinGeckoTrendingProvider, CryptoPanicProvider, NewsProvider
 from auraquant.sentiment.sentiment_processor import SentimentProcessor
 from auraquant.sentiment.types import NewsItem
-from auraquant.util.ai_log.store import AiLogStore
+from auraquant.util.ai_log.store import AiLogEvent, AiLogStore
 from auraquant.util.ai_log.realtime_uploader import make_uploader_from_env
 
 from auraquant.weex.private_client import WeexPrivateRestClient
@@ -406,6 +406,11 @@ class AutonomousOrchestratorTest:
                                 f"[MANAGE] Max hold exceeded ({held_for:.0f}s >= {max_hold_seconds}s). "
                                 "Attempting best-effort close."
                             )
+                            equity_before = None
+                            try:
+                                equity_before = float(self.execution.equity())
+                            except Exception:
+                                equity_before = None
                             now_ts = time.time()
                             if now_ts - last_max_hold_close_attempt_ts >= max_hold_retry_interval_seconds:
                                 last_max_hold_close_attempt_ts = now_ts
@@ -413,6 +418,36 @@ class AutonomousOrchestratorTest:
                                     self.execution.close_open_position_best_effort()
                                 except Exception as exc:
                                     logger.warning(f"[MANAGE] Max-hold close failed: {exc}")
+                                pnl = None
+                                try:
+                                    self.execution.reconcile(now=now)
+                                    if equity_before is not None:
+                                        pnl = float(self.execution.equity()) - float(equity_before)
+                                except Exception:
+                                    pnl = None
+
+                                try:
+                                    if self.store is not None:
+                                        self.store.append(
+                                            AiLogEvent(
+                                                stage="TRADE_CLOSED",
+                                                model=f"AuraQuant.{type(self.execution).__name__}",
+                                                input={
+                                                    "symbol": str(getattr(pos, "symbol", "")),
+                                                    "pnl_usdt": None if pnl is None else round(float(pnl), 6),
+                                                    "reason": "MAX_HOLD",
+                                                    "held_for_seconds": round(float(held_for), 2),
+                                                },
+                                                output={
+                                                    "equity_now": round(float(self.execution.equity()), 6),
+                                                    "trade_count": int(self.execution.trade_count()),
+                                                },
+                                                explanation="Force close due to MAX_HOLD_SECONDS.",
+                                                timestamp=now,
+                                            )
+                                        )
+                                except Exception as e:
+                                    logger.debug(f"[AI LOG] Failed to append max-hold TRADE_CLOSED: {e}")
                             else:
                                 logger.warning(
                                     "[MANAGE] Max-hold close throttled; waiting before retry"
@@ -479,7 +514,43 @@ class AutonomousOrchestratorTest:
                 logger.warning("[CLEANUP] Detected an open position; attempting best-effort close")
                 closer = getattr(self.execution, "close_open_position_best_effort", None)
                 if callable(closer):
+                    equity_before = None
+                    try:
+                        equity_before = float(self.execution.equity())
+                    except Exception:
+                        equity_before = None
                     closer()
+
+                    pnl = None
+                    try:
+                        self.execution.reconcile(now=datetime.now(timezone.utc).replace(tzinfo=None))
+                        if equity_before is not None:
+                            pnl = float(self.execution.equity()) - float(equity_before)
+                    except Exception:
+                        pnl = None
+
+                    try:
+                        now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+                        if self.store is not None:
+                            self.store.append(
+                                AiLogEvent(
+                                    stage="TRADE_CLOSED",
+                                    model=f"AuraQuant.{type(self.execution).__name__}",
+                                    input={
+                                        "symbol": str(getattr(pos, "symbol", "")),
+                                        "pnl_usdt": None if pnl is None else round(float(pnl), 6),
+                                        "reason": "CLEANUP",
+                                    },
+                                    output={
+                                        "equity_now": round(float(self.execution.equity()), 6),
+                                        "trade_count": int(self.execution.trade_count()),
+                                    },
+                                    explanation="Force close during runner cleanup.",
+                                    timestamp=now_ts,
+                                )
+                            )
+                    except Exception as e:
+                        logger.debug(f"[AI LOG] Failed to append cleanup TRADE_CLOSED: {e}")
         except Exception:
             logger.exception("[CLEANUP] Failed to close open position (continuing shutdown)")
 

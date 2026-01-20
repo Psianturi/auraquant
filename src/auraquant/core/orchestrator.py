@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
@@ -58,6 +59,57 @@ class Orchestrator:
     # Cache sentiment from SCAN phase to use in QUALIFY phase (same tick context)
     _last_scan_report: Optional[object] = field(default=None, init=False, repr=False)
     _last_scan_symbol: Optional[str] = field(default=None, init=False, repr=False)
+
+    _offline_policy_cache: Optional[dict] = field(default=None, init=False, repr=False)
+    _offline_policy_mtime: float = field(default=0.0, init=False, repr=False)
+
+    def _offline_policy_multiplier(self, symbol: str, side: str) -> float:
+
+        if os.getenv("ENABLE_OFFLINE_POLICY", "0") != "1":
+            return 1.0
+
+        path = os.getenv("OFFLINE_POLICY_PATH", "models/offline_policy.json")
+        try:
+            st = os.stat(path)
+            mtime = float(st.st_mtime)
+        except Exception:
+            return 1.0
+
+        try:
+            if self._offline_policy_cache is None or mtime != float(self._offline_policy_mtime):
+                with open(path, "r", encoding="utf-8") as f:
+                    self._offline_policy_cache = json.load(f)
+                self._offline_policy_mtime = mtime
+        except Exception:
+            return 1.0
+
+        obj = self._offline_policy_cache
+        if not isinstance(obj, dict):
+            return 1.0
+        symbols = obj.get("symbols")
+        if not isinstance(symbols, dict):
+            return 1.0
+        sym_rec = symbols.get(symbol)
+        if not isinstance(sym_rec, dict):
+            return 1.0
+        side_rec = sym_rec.get(str(side).upper())
+        if not isinstance(side_rec, dict):
+            return 1.0
+        if side_rec.get("enabled") is not True:
+            return 1.0
+
+        try:
+            mult = float(side_rec.get("confidence_multiplier", 1.0))
+        except Exception:
+            mult = 1.0
+
+        try:
+            max_delta = float(os.getenv("OFFLINE_POLICY_MAX_MULTIPLIER", "0.15"))
+        except Exception:
+            max_delta = 0.15
+        lo = 1.0 - max_delta
+        hi = 1.0 + max_delta
+        return float(min(max(mult, lo), hi))
 
     def step(self, now: datetime) -> None:
         """Advance the bot by one tick."""
@@ -378,6 +430,12 @@ class Orchestrator:
             p_win = p
             confidence = float(min(max(confidence * (0.5 + 0.5 * p), 0.0), 1.0))
             self._qualified_features_by_symbol[tick.symbol] = fv
+
+        try:
+            mult = self._offline_policy_multiplier(tick.symbol, signal.side)
+            confidence = float(min(max(confidence * float(mult), 0.0), 1.0))
+        except Exception:
+            pass
         if confidence < self.config.min_confidence:
             payload = {
                 "module": "Orchestrator",
