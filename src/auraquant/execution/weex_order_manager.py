@@ -554,27 +554,72 @@ class WeexOrderManager(BaseOrderManager):
         position_side = "long" if pos.side == "LONG" else "short"
         now_ms = int(time.time() * 1000)
 
-        def _place(plan_type: str, trigger_price: float, client_suffix: str) -> Optional[str]:
-            body = {
-                "symbol": weex_symbol,
-                "clientOrderId": f"aura_{client_suffix}_{now_ms}",
-                "planType": plan_type,
-                "triggerPrice": self._format_price(float(trigger_price), pos.symbol),
-                "executePrice": "0",  # market on trigger
-                "size": self._format_size(float(pos.size)),
-                "positionSide": position_side,
-                "marginMode": int(self.margin_mode),
-            }
-            resp = self.client.signed_post("/capi/v2/order/placeTpSlOrder", body)
-            if resp.status_code != 200:
-                raise RuntimeError(f"WEEX placeTpSlOrder failed HTTP {resp.status_code}: {(resp.text or '')[:200]}")
+        def _looks_like_trigger_price_step_error(msg: str) -> bool:
+            s = (msg or "").lower()
+            return ("40015" in s) and (
+                ("trigger price" in s)
+                or ("updatetriggerprice" in s)
+                or ("stepsize" in s)
+                or ("invalid_argument" in s)
+            )
 
-            payload = resp.json()
-            if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-                first = payload[0]
-                if first.get("success") is True and first.get("orderId") is not None:
-                    return str(first.get("orderId"))
-            return None
+        def _candidate_trigger_prices(p: float) -> list[str]:
+            candidates: list[str] = []
+            try:
+                candidates.append(self._format_price(float(p), pos.symbol))
+            except Exception:
+                pass
+
+            candidates.append(str(float(p)))
+
+            for decimals in (3, 2, 1, 0):
+                candidates.append(f"{float(p):.{decimals}f}")
+
+            # De-dupe while preserving order; also trim trailing zeros.
+            out: list[str] = []
+            seen: set[str] = set()
+            for c in candidates:
+                c2 = (c or "").strip()
+                if not c2:
+                    continue
+                if "." in c2:
+                    c2 = c2.rstrip("0").rstrip(".")
+                if c2 in seen:
+                    continue
+                seen.add(c2)
+                out.append(c2)
+            return out
+
+        def _place(plan_type: str, trigger_price: float, client_suffix: str) -> Optional[str]:
+            last_error: Optional[str] = None
+            for tp in _candidate_trigger_prices(float(trigger_price)):
+                body = {
+                    "symbol": weex_symbol,
+                    "clientOrderId": f"aura_{client_suffix}_{now_ms}",
+                    "planType": plan_type,
+                    "triggerPrice": tp,
+                    "executePrice": "0",  # market on trigger
+                    "size": self._format_size(float(pos.size)),
+                    "positionSide": position_side,
+                    "marginMode": int(self.margin_mode),
+                }
+                resp = self.client.signed_post("/capi/v2/order/placeTpSlOrder", body)
+                if resp.status_code != 200:
+                    msg = (resp.text or "")[:300]
+                    last_error = msg
+                    if _looks_like_trigger_price_step_error(msg):
+                        continue
+                    raise RuntimeError(f"WEEX placeTpSlOrder failed HTTP {resp.status_code}: {(resp.text or '')[:200]}")
+
+                payload = resp.json()
+                if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                    first = payload[0]
+                    if first.get("success") is True and first.get("orderId") is not None:
+                        return str(first.get("orderId"))
+
+                return None
+
+            raise RuntimeError(f"WEEX placeTpSlOrder failed: {last_error or 'unknown error'}")
 
         pos.server_tp_order_id = _place("profit_plan", float(pos.take_profit), "tp")
         pos.server_sl_order_id = _place("loss_plan", float(pos.stop_loss), "sl")
@@ -962,16 +1007,16 @@ class WeexOrderManager(BaseOrderManager):
         p = float(price)
         sym_lower = symbol.lower()
         # Determine decimal places based on price magnitude and symbol
-        if "btc" in sym_lower or p >= 1000:
+        if "btc" in sym_lower or "bnb" in sym_lower or p >= 1000:
             # BTC, BNB: 1-2 decimals
             decimals = 2 if p < 10000 else 1
-        elif "eth" in sym_lower or p >= 100:
+        elif "eth" in sym_lower or "sol" in sym_lower or "ltc" in sym_lower or p >= 100:
             # ETH, SOL, LTC: 2 decimals
             decimals = 2
-        elif p >= 1:
+        elif "xrp" in sym_lower or p >= 1:
             # XRP: 4 decimals
             decimals = 4
-        elif p >= 0.01:
+        elif "doge" in sym_lower or "ada" in sym_lower or p >= 0.01:
             # DOGE, ADA: 5 decimals
             decimals = 5
         else:

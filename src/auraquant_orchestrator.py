@@ -446,7 +446,7 @@ class AutonomousOrchestratorTest:
 
         total_time = (self.end_time - self.start_time).total_seconds()
 
-        status = "PASS" if self.trade_count >= self.min_trades else "CHECK"
+        status = "PASS" if self.trade_count >= self.min_trades else "FAIL"
         report = (
             "\n"
             "============================================================\n"
