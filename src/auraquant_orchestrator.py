@@ -279,9 +279,10 @@ class AutonomousOrchestratorTest:
 
         # Match short-run testing needs; can be overridden via env.
         try:
-            config.min_confidence = float(os.getenv("MIN_CONFIDENCE", "0.05"))
+ 
+            config.min_confidence = float(os.getenv("MIN_CONFIDENCE", "0.06"))
         except Exception:
-            config.min_confidence = 0.05
+            config.min_confidence = 0.06
 
         correlation.window = 10
         # Ensure we always keep BTC history available (correlation lead).
