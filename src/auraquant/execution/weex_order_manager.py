@@ -40,6 +40,9 @@ class WeexLivePosition:
     highest_price: Optional[float] = None  # Track best price for trailing (LONG)
     lowest_price: Optional[float] = None  # Track best price for trailing (SHORT)
 
+    server_tp_order_id: Optional[str] = None
+    server_sl_order_id: Optional[str] = None
+
 
 class WeexOrderManager(BaseOrderManager):
     """Live WEEX execution.
@@ -51,6 +54,8 @@ class WeexOrderManager(BaseOrderManager):
     - GET  /capi/v2/account/assets
     - POST /capi/v2/account/leverage
     - POST /capi/v2/order/placeOrder
+    - POST /capi/v2/order/placeTpSlOrder (optional)
+    - POST /capi/v2/order/cancel_plan (optional)
 
     Notes:
     - MVP supports ONE open position at a time.
@@ -96,6 +101,9 @@ class WeexOrderManager(BaseOrderManager):
         # Optional: send SL/TP to exchange so they trigger server-side.
         self.use_preset_sltp = os.getenv("WEEX_USE_PRESET_SLTP", "0") == "1"
         self._preset_sltp_supported: Optional[bool] = None
+
+        #  place separate TP/SL plan orders after the entry is opened.
+        self.use_server_tpsl_after_open = os.getenv("WEEX_USE_SERVER_TPSL_AFTER_OPEN", "0") == "1"
 
         self._starting_equity: Optional[float] = None
         self._equity: float = 0.0
@@ -252,6 +260,13 @@ class WeexOrderManager(BaseOrderManager):
         )
         self._position = pos
         self._positions_opened += 1
+
+        if self.use_server_tpsl_after_open and not (attempted_preset and self._preset_sltp_supported is True):
+            try:
+                self._place_server_side_tpsl_orders(pos)
+            except Exception as e:
+                logger.warning(f"[WEEX] Failed to place server-side TP/SL plan orders (non-fatal): {e}")
+
         return pos
 
     @staticmethod
@@ -425,6 +440,8 @@ class WeexOrderManager(BaseOrderManager):
         
         # Step 1: Cancel any pending orders first (root cause of 40015)
         try:
+
+            self._cancel_server_side_tpsl_orders(pos)
             self._cancel_all_orders(weex_symbol)
         except Exception as e:
             logger.warning(f"[WEEX] Cancel orders failed (non-fatal): {e}")
@@ -499,6 +516,68 @@ class WeexOrderManager(BaseOrderManager):
                 logger.debug(f"[WEEX] Cancel orders response: {resp.status_code}")
         except Exception as e:
             logger.debug(f"[WEEX] Cancel orders exception: {e}")
+
+    def _cancel_plan_order(self, order_id: str) -> None:
+        order_id = str(order_id).strip()
+        if not order_id:
+            return
+
+        try:
+            resp = self.client.signed_post("/capi/v2/order/cancel_plan", {"orderId": order_id})
+        except Exception as e:
+            logger.debug(f"[WEEX] cancel_plan exception for {order_id}: {e}")
+            return
+
+        if resp.status_code == 200:
+            return
+
+        logger.debug(f"[WEEX] cancel_plan HTTP {resp.status_code}: {resp.text[:120]}")
+
+    def _cancel_server_side_tpsl_orders(self, pos: WeexLivePosition) -> None:
+        if pos.server_tp_order_id:
+            self._cancel_plan_order(pos.server_tp_order_id)
+            pos.server_tp_order_id = None
+        if pos.server_sl_order_id:
+            self._cancel_plan_order(pos.server_sl_order_id)
+            pos.server_sl_order_id = None
+
+    def _place_server_side_tpsl_orders(self, pos: WeexLivePosition) -> None:
+        """Place TP and SL as server-side plan orders.
+        """
+
+        if not self.execute_orders:
+            return
+        if not pos.is_open:
+            return
+
+        weex_symbol = pos.weex_symbol or self._resolve_weex_symbol(pos.symbol)
+        position_side = "long" if pos.side == "LONG" else "short"
+        now_ms = int(time.time() * 1000)
+
+        def _place(plan_type: str, trigger_price: float, client_suffix: str) -> Optional[str]:
+            body = {
+                "symbol": weex_symbol,
+                "clientOrderId": f"aura_{client_suffix}_{now_ms}",
+                "planType": plan_type,
+                "triggerPrice": self._format_price(float(trigger_price), pos.symbol),
+                "executePrice": "0",  # market on trigger
+                "size": self._format_size(float(pos.size)),
+                "positionSide": position_side,
+                "marginMode": int(self.margin_mode),
+            }
+            resp = self.client.signed_post("/capi/v2/order/placeTpSlOrder", body)
+            if resp.status_code != 200:
+                raise RuntimeError(f"WEEX placeTpSlOrder failed HTTP {resp.status_code}: {(resp.text or '')[:200]}")
+
+            payload = resp.json()
+            if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                first = payload[0]
+                if first.get("success") is True and first.get("orderId") is not None:
+                    return str(first.get("orderId"))
+            return None
+
+        pos.server_tp_order_id = _place("profit_plan", float(pos.take_profit), "tp")
+        pos.server_sl_order_id = _place("loss_plan", float(pos.stop_loss), "sl")
 
     def _cancel_order_by_id(self, weex_symbol: str, order_id: str) -> None:
         """Best-effort cancel for a single blocking order.
@@ -637,8 +716,12 @@ class WeexOrderManager(BaseOrderManager):
             if not has_open:
                 if self._position is not None:
                     logger.info("[WEEX] No active position found. Clearing local state and incrementing trades_closed.")
+                    try:
+                        self._cancel_server_side_tpsl_orders(self._position)
+                    except Exception:
+                        pass
                     self._position.is_open = False
-                    self._trades_closed += 1  # Increment when position is confirmed closed
+                    self._trades_closed += 1  
                     self._position = None
                 return True
 

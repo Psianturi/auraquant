@@ -397,7 +397,7 @@ class AutonomousOrchestratorTest:
                 self.prices.get_tick(warm_symbols, now=now)
 
                 pos = self.execution.position()
-                max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "180"))
+                max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "1800"))
                 if pos is not None and max_hold_seconds > 0:
                     held_for = (now - pos.opened_at).total_seconds()
                     if held_for >= max_hold_seconds:

@@ -110,18 +110,21 @@ This will run comprehensive tests on all components and generate performance rep
 
 **How positions are closed:**
 
-1. **Preset SL/TP (Default):** When `WEEX_USE_PRESET_SLTP=1` (default), SL/TP orders are sent to WEEX exchange with the opening order. The exchange handles closing automatically when price hits SL/TP.
+1. **Preset SL/TP (Optional):** When `WEEX_USE_PRESET_SLTP=1`, SL/TP prices are sent with the opening order (`presetStopLossPrice` / `presetTakeProfitPrice`). If WEEX rejects those parameters, the bot retries without preset SL/TP and auto-disables this mode.
 
-2. **Local Monitoring (Fallback):** When `WEEX_USE_PRESET_SLTP=0`, the bot monitors price locally via `on_price_tick()` and sends market close orders when SL/TP is hit. This requires the bot to be continuously running.
+2. **Server-side TP/SL After Open (Optional):** When `WEEX_USE_SERVER_TPSL_AFTER_OPEN=1`, the bot places TP/SL as plan orders after the entry is opened (`/capi/v2/order/placeTpSlOrder`). This provides server-side protection even if the bot process stops.
 
-3. **Max Hold Timeout:** Positions held longer than `MAX_HOLD_SECONDS` (default: 180s) are closed via best-effort market order.
+3. **Local Monitoring (Fallback):** If both server-side modes are off, the bot monitors price locally via `on_price_tick()` and sends market close orders when SL/TP is hit. This requires the bot to be continuously running.
 
-4. **No Single-Position Close Endpoint:** WEEX doesn't have a dedicated single-position close endpoint. Closing is done via `placeOrder` with type=3 (close long) or type=4 (close short).
+4. **Max Hold Timeout:** Positions held longer than `MAX_HOLD_SECONDS` (default: 1800s)
+
+5. **No Single-Position Close Endpoint:** WEEX doesn't have a dedicated single-position close endpoint. Closing is done via `placeOrder` with type=3 (close long) or type=4 (close short).
 
 **Environment Variables:**
 ```bash
-WEEX_USE_PRESET_SLTP=1          # Send SL/TP to exchange (recommended)
-MAX_HOLD_SECONDS=180            # Force-close after N seconds
+WEEX_USE_PRESET_SLTP=0         
+WEEX_USE_SERVER_TPSL_AFTER_OPEN=1  # Place TP/SL plan orders after open 
+MAX_HOLD_SECONDS=1800          
 WEEX_CLOSE_RETRY_COOLDOWN_SECONDS=60  # Cooldown between close retries
 ```
 
