@@ -519,7 +519,7 @@ class Orchestrator:
             )
         except RuntimeError as e:
             err_msg = str(e)
-            if "40015" in err_msg or "margin" in err_msg.lower():
+            if "margin" in err_msg.lower() or "insufficient" in err_msg.lower():
                 log_json(self.logger, {
                     "module": "Orchestrator",
                     "timestamp": utc_iso(tick.now),
@@ -527,6 +527,16 @@ class Orchestrator:
                     "symbol": tick.symbol,
                     "reason": "Insufficient margin",
                     "error": err_msg[:100],
+                }, level=logging.WARNING)
+                return
+            if "40015" in err_msg:
+                log_json(self.logger, {
+                    "module": "Orchestrator",
+                    "timestamp": utc_iso(tick.now),
+                    "event": "ORDER_SKIPPED",
+                    "symbol": tick.symbol,
+                    "reason": "WEEX rejected order (40015)",
+                    "error": err_msg[:200],
                 }, level=logging.WARNING)
                 return
             raise  # Re-raise other errors

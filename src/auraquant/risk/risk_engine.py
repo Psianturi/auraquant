@@ -187,7 +187,7 @@ class RiskEngine:
     tp_atr_mult: float = 4.0  
     min_atr_pct: float = 0.0035 
     
-    min_atr_for_trade_pct: float = 0.0004  
+    min_atr_for_trade_pct: float = 0.00035  
 
     def validate_intent(self, intent_data: TradeIntent, equity_now: float, now: Optional[datetime] = None) -> RiskDecision:
         now = now or datetime.utcnow()

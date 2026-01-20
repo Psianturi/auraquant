@@ -93,9 +93,9 @@ class WeexOrderManager(BaseOrderManager):
             self.trailing_distance_pct = 0.004
         self.margin_mode = int(margin_mode)
 
-        # Enable preset SL/TP by default - sends SL/TP to exchange so they trigger server-side
-
-        self.use_preset_sltp = os.getenv("WEEX_USE_PRESET_SLTP", "1") == "1"
+        # Optional: send SL/TP to exchange so they trigger server-side.
+        self.use_preset_sltp = os.getenv("WEEX_USE_PRESET_SLTP", "0") == "1"
+        self._preset_sltp_supported: Optional[bool] = None
 
         self._starting_equity: Optional[float] = None
         self._equity: float = 0.0
@@ -204,13 +204,27 @@ class WeexOrderManager(BaseOrderManager):
             "marginMode": int(self.margin_mode),
         }
 
-        if self.use_preset_sltp:
+        attempted_preset = False
+        if self.use_preset_sltp and self._preset_sltp_supported is not False:
+            attempted_preset = True
             body["presetTakeProfitPrice"] = self._format_price(take_profit, symbol)
             body["presetStopLossPrice"] = self._format_price(stop_loss, symbol)
 
         resp = self.client.signed_post("/capi/v2/order/placeOrder", body)
         if resp.status_code != 200:
-            raise RuntimeError(f"WEEX placeOrder failed HTTP {resp.status_code}: {resp.text[:200]}")
+            msg = (resp.text or "")[:500]
+            if attempted_preset and self._looks_like_open_sltp_invalid(msg):
+                self._preset_sltp_supported = False
+                logger.warning("[WEEX] placeOrder rejected preset SL/TP; retrying without preset SL/TP (auto-disable).")
+                body.pop("presetTakeProfitPrice", None)
+                body.pop("presetStopLossPrice", None)
+                resp = self.client.signed_post("/capi/v2/order/placeOrder", body)
+
+            if resp.status_code != 200:
+                raise RuntimeError(f"WEEX placeOrder failed HTTP {resp.status_code}: {(resp.text or '')[:200]}")
+
+        if attempted_preset and self._preset_sltp_supported is None:
+            self._preset_sltp_supported = True
 
         try:
             data = resp.json()
@@ -239,6 +253,19 @@ class WeexOrderManager(BaseOrderManager):
         self._position = pos
         self._positions_opened += 1
         return pos
+
+    @staticmethod
+    def _looks_like_open_sltp_invalid(msg: str) -> bool:
+        """Heuristic for WEEX rejecting preset SL/TP params on order open."""
+        s = (msg or "").lower()
+        if "invalid_argument" in s and ("tp" in s or "take" in s or "stop" in s):
+            return True
+        if "order open" in s and ("tp" in s or "take" in s or "stop" in s):
+            return True
+
+        if "\"code\":\"40015\"" in s and "invalid" in s:
+            return True
+        return False
 
     def on_price_tick(self, symbol: str, price: float, now: datetime) -> Optional[TradeResult]:
         pos = self.position()
