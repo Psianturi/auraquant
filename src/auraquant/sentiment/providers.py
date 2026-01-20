@@ -231,29 +231,25 @@ class CoinGeckoTrendingProvider:
                     url=None
                 ))
         
-        # If no direct relevance, add general market sentiment from top trending coins
-        if not items and trending_coins:
-            top_movers = []
-            for coin_wrapper in trending_coins[:5]:
-                coin = coin_wrapper.get("item", {})
-                coin_name = coin.get("name", "")
-                coin_symbol = coin.get("symbol", "")
-                price_data = coin.get("data", {})
-                pct_24h = price_data.get("price_change_percentage_24h", {})
-                usd_change = pct_24h.get("usd") if isinstance(pct_24h, dict) else None
-                if usd_change is not None:
-                    top_movers.append((coin_symbol.upper(), usd_change))
-            
-            if top_movers:
-                avg_change = sum(c[1] for c in top_movers) / len(top_movers)
-                market_bias = "bullish" if avg_change > 0 else "bearish"
-                title = f"{internal} coingecko market sentiment {market_bias} (top5 avg={avg_change:+.2f}%)"
-                items.append(NewsItem(
-                    title=title,
-                    published_at=now,
-                    source="coingecko-trending",
-                    url=None
-                ))
+        # FALLBACK: Use coin-specific momentum data from CoinGecko markets API
+        if not items:
+            try:
+                from auraquant.data.coingecko_client import CoinGeckoClient, WEEX_BASE_TO_COINGECKO_ID
+                client = CoinGeckoClient()
+                markets = client.get_markets(vs_currency="usd", ids=[cid], ttl_seconds=ttl_seconds)
+                if markets:
+                    m = markets[0]
+                    chg_pct = float(m.price_change_percentage_24h or 0.0)
+                    market_bias = "bullish" if chg_pct > 0.3 else ("bearish" if chg_pct < -0.3 else "neutral")
+                    title = f"{internal} coingecko 24h change {market_bias} (chg={chg_pct:+.2f}%)"
+                    items.append(NewsItem(
+                        title=title,
+                        published_at=now,
+                        source="coingecko-market",
+                        url=None
+                    ))
+            except Exception:
+                pass  
 
         return items[:limit]
 

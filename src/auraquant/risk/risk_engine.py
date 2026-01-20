@@ -188,7 +188,7 @@ class RiskEngine:
     min_atr_pct: float = 0.0035 
     
     # Sideways market filter - skip trading when volatility is too low
-    min_atr_for_trade_pct: float = 0.002  
+    min_atr_for_trade_pct: float = 0.0016  
 
     def validate_intent(self, intent_data: TradeIntent, equity_now: float, now: Optional[datetime] = None) -> RiskDecision:
         now = now or datetime.utcnow()
