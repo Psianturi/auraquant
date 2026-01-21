@@ -121,11 +121,11 @@ class GeminiScorer:
                 elif attempt == 0:
                     # First attempt failed (possibly 429), wait and retry
                     logger.info(f"[GeminiScorer] Retry after 3s backoff...")
-                    time.sleep(3.0)
+                    time.sleep(5.0)
             except Exception as e:
                 logger.debug(f"[GeminiScorer] Attempt {attempt+1} error: {e}")
                 if attempt == 0:
-                    time.sleep(3.0)
+                    time.sleep(5.0)
         
         return None
     

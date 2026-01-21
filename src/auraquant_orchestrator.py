@@ -47,31 +47,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-PIDFILE_PATH = REPO_ROOT / "runtime_cache" / "orchestrator.pid"
+def _pidfile_path(instance: str | None = None) -> Path:
+    suffix = ""
+    if instance:
+        s = str(instance).strip()
+        if s:
+            safe = "".join(ch for ch in s if ch.isalnum() or ch in {"-", "_"})
+            if safe:
+                suffix = f".{safe}"
+    return REPO_ROOT / "runtime_cache" / f"orchestrator{suffix}.pid"
 
 
-def _write_pidfile() -> None:
-    PIDFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PIDFILE_PATH.write_text(str(os.getpid()), encoding="utf-8")
+def _write_pidfile(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(os.getpid()), encoding="utf-8")
 
 
-def _remove_pidfile() -> None:
+def _remove_pidfile(path: Path) -> None:
     try:
-        if PIDFILE_PATH.exists():
-            PIDFILE_PATH.unlink()
+        if path.exists():
+            path.unlink()
     except Exception:
         pass
 
 
-def _stop_running_bot_best_effort(timeout_seconds: float = 5.0) -> bool:
+def _stop_running_bot_best_effort(pidfile_path: Path, timeout_seconds: float = 5.0) -> bool:
     """Stop a previously started runner instance (best-effort).
 
     Uses a pidfile written by this runner during normal runs.
     """
     try:
-        if not PIDFILE_PATH.exists():
+        if not pidfile_path.exists():
             return False
-        raw = PIDFILE_PATH.read_text(encoding="utf-8").strip()
+        raw = pidfile_path.read_text(encoding="utf-8").strip()
         if not raw:
             return False
         pid = int(raw)
@@ -724,6 +732,12 @@ def main():
         description="AuraQuant orchestrator real-time runner (with AI logging)"
     )
     parser.add_argument(
+        "--instance",
+        type=str,
+        default="",
+        help="Optional instance name to avoid pidfile/log collisions when running multiple bots.",
+    )
+    parser.add_argument(
         "--emergency-close",
         action="store_true",
         help="Stop any running bot (via pidfile), disable Gemini calls, and force close positions/cancel orders, then exit.",
@@ -768,6 +782,13 @@ def main():
     )
     args = parser.parse_args()
 
+    pidfile = _pidfile_path(args.instance)
+
+    if args.log_file == "ai_logs/auraquant_orchestrator.ndjson" and str(args.instance).strip():
+        safe = "".join(ch for ch in str(args.instance).strip() if ch.isalnum() or ch in {"-", "_"})
+        if safe:
+            args.log_file = f"ai_logs/auraquant_orchestrator.{safe}.ndjson"
+
     if args.forever:
         args.duration = 0
 
@@ -782,8 +803,8 @@ def main():
         os.environ["DISABLE_GEMINI_API"] = "1"
         os.environ["USE_GEMINI_SENTIMENT"] = "0"
 
-        stopped = _stop_running_bot_best_effort(timeout_seconds=8.0)
-        logger.warning(f"[EMERGENCY] stop_running_bot={stopped} pidfile={str(PIDFILE_PATH)}")
+        stopped = _stop_running_bot_best_effort(pidfile_path=pidfile, timeout_seconds=8.0)
+        logger.warning(f"[EMERGENCY] stop_running_bot={stopped} pidfile={str(pidfile)}")
 
         client = WeexPrivateRestClient()
         client.require_env()
@@ -799,8 +820,8 @@ def main():
         raise SystemExit(0)
 
     try:
-        _write_pidfile()
-        atexit.register(_remove_pidfile)
+        _write_pidfile(pidfile)
+        atexit.register(_remove_pidfile, pidfile)
         test = AutonomousOrchestratorTest(
             symbols=symbols,
             duration_seconds=args.duration,
