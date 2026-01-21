@@ -136,13 +136,54 @@ class WeexOrderManager(BaseOrderManager):
         self.reconcile(now=datetime.utcnow())
     
     def _cleanup_stale_orders_on_start(self) -> None:
-        """Cancel all pending orders on startup to free locked margin."""
-        cleanup_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "LTC/USDT", "BNB/USDT"]
-        logger.info("[WEEX] 🧹 Cleaning up stale orders on startup...")
+        """Cancel pending orders on startup to free locked margin.
+
+        NOTE: When running multiple bot processes (one per symbol), scope or disable this.
+        Otherwise each process can cancel the other's pending orders.
+
+        Env controls:
+        - WEEX_STARTUP_CLEANUP: 1/0 (default 1)
+        - WEEX_STARTUP_CLEANUP_SCOPE: all|symbols|symbol (default all)
+        - WEEX_STARTUP_CLEANUP_SYMBOLS: comma-separated symbols (for scope=symbols)
+        - WEEX_STARTUP_CLEANUP_SYMBOL: single symbol (for scope=symbol)
+        - WEEX_STARTUP_CLEANUP_CANCEL_ORDER_TYPE: normal|plan (default normal)
+        """
+
+        if os.getenv("WEEX_STARTUP_CLEANUP", "1") != "1":
+            logger.info("[WEEX] 🧹 Startup order cleanup disabled (WEEX_STARTUP_CLEANUP=0)")
+            return
+
+        scope = str(os.getenv("WEEX_STARTUP_CLEANUP_SCOPE", "all")).strip().lower() or "all"
+        cancel_type = str(os.getenv("WEEX_STARTUP_CLEANUP_CANCEL_ORDER_TYPE", "normal")).strip().lower() or "normal"
+        if cancel_type not in {"normal", "plan"}:
+            cancel_type = "normal"
+
+        cleanup_symbols: list[str]
+
+        if scope == "symbols":
+            raw = str(os.getenv("WEEX_STARTUP_CLEANUP_SYMBOLS", "")).strip()
+            cleanup_symbols = [s.strip() for s in raw.split(",") if s.strip()]
+        elif scope == "symbol":
+            sym = str(os.getenv("WEEX_STARTUP_CLEANUP_SYMBOL", "")).strip()
+            if not sym:
+                sym = str(os.getenv("WEEX_SYMBOL", "")).strip()
+            if not sym:
+                sym = str(os.getenv("WEEX_SYMBOLS", "")).split(",")[0].strip()
+            cleanup_symbols = [sym] if sym else []
+        else:
+            cleanup_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "LTC/USDT", "BNB/USDT"]
+
+        if not cleanup_symbols:
+            logger.info("[WEEX] 🧹 Startup cleanup skipped (no symbols resolved)")
+            return
+
+        logger.info(
+            f"[WEEX] 🧹 Cleaning up stale orders on startup... scope={scope} cancelOrderType={cancel_type}"
+        )
         for symbol in cleanup_symbols:
             try:
                 weex_symbol = self._resolve_weex_symbol(symbol)
-                self._cancel_all_orders(weex_symbol)
+                self._cancel_all_orders(weex_symbol, cancel_order_type=cancel_type)
             except Exception as e:
                 logger.debug(f"[WEEX] Cleanup {symbol} skipped: {e}")
 
@@ -504,10 +545,13 @@ class WeexOrderManager(BaseOrderManager):
             logger.error(f"[WEEX] Close exception ({reason}): {exc}")
             return False
     
-    def _cancel_all_orders(self, weex_symbol: str) -> None:
+    def _cancel_all_orders(self, weex_symbol: str, cancel_order_type: str = "normal") -> None:
         """Cancel all pending orders for a symbol to prevent 40015 conflicts."""
         #  docs: POST /capi/v2/order/cancelAllOrders
-        body = {"symbol": weex_symbol, "cancelOrderType": "normal"}
+        cot = str(cancel_order_type).strip().lower() or "normal"
+        if cot not in {"normal", "plan"}:
+            cot = "normal"
+        body = {"symbol": weex_symbol, "cancelOrderType": cot}
         try:
             resp = self.client.signed_post("/capi/v2/order/cancelAllOrders", body)
             if resp.status_code == 200:
