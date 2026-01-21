@@ -61,6 +61,7 @@ class SentimentProcessor:
     _cache_updated_at: Dict[str, datetime] = field(default_factory=dict, init=False, repr=False)
     
     _last_gemini_result: Optional[GeminiSentimentResult] = field(default=None, init=False, repr=False)
+    _last_gemini_call_at: Dict[str, datetime] = field(default_factory=dict, init=False, repr=False)
 
     # Fallback behavior when provider fails
     fallback_on_error: MarketBias = "NEUTRAL"
@@ -74,11 +75,24 @@ class SentimentProcessor:
         disable_gemini = os.getenv("DISABLE_GEMINI_API", "0") == "1"
         use_gemini = (os.getenv("USE_GEMINI_SENTIMENT", "1") == "1") and (not disable_gemini)
         gemini_result: Optional[GeminiSentimentResult] = None
+
+        try:
+            gemini_min_interval_seconds = float(os.getenv("GEMINI_MIN_INTERVAL_SECONDS", "120"))
+        except Exception:
+            gemini_min_interval_seconds = 120.0
+        if use_gemini and gemini_min_interval_seconds > 0:
+            key = symbol.upper().strip()
+            last_call = self._last_gemini_call_at.get(key)
+            if last_call is not None:
+                since = (now - last_call).total_seconds()
+                if since < gemini_min_interval_seconds:
+                    use_gemini = False
         
         if use_gemini and items:
             try:
                 scorer = get_gemini_scorer()
                 if scorer.is_available():
+                    self._last_gemini_call_at[symbol.upper().strip()] = now
                     headlines = [item.title for item in items]
                     gemini_result = scorer.analyze_headlines(headlines, symbol, now)
                     self._last_gemini_result = gemini_result

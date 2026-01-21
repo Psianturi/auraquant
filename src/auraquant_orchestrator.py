@@ -232,6 +232,9 @@ class AutonomousOrchestratorTest:
         self.upload_success = 0
         self.upload_failed = 0
 
+        self._hold_anchor_at: datetime | None = None
+        self._hold_anchor_symbol: str | None = None
+
         self.store = AiLogStore(log_file)
         self.uploader = make_uploader_from_env(queue_dir="ai_logs/.upload_queue")
         if self.uploader is not None:
@@ -243,7 +246,32 @@ class AutonomousOrchestratorTest:
         # Monkeypatch store.append to also push to uploader, without changing core orchestrator.
         orig_append = self.store.append
 
+        try:
+            ai_log_throttle_seconds = float(os.getenv("AI_LOG_THROTTLE_SECONDS", "120"))
+        except Exception:
+            ai_log_throttle_seconds = 120.0
+        throttle_stages_env = os.getenv("AI_LOG_THROTTLE_STAGES", "SCAN,QUALIFY")
+        throttle_stages = {s.strip().upper() for s in str(throttle_stages_env).split(",") if s.strip()}
+        _last_stage_emit_ts: dict[str, float] = {}
+
         def _append_and_upload(event):
+            try:
+                stage = str(getattr(event, "stage", "")).upper().strip()
+                if ai_log_throttle_seconds > 0 and stage in throttle_stages:
+                    ts = getattr(event, "timestamp", None)
+                    now_ts = time.time()
+                    if ts is not None:
+                        try:
+                            now_ts = float(ts.timestamp())
+                        except Exception:
+                            now_ts = time.time()
+                    last_ts = float(_last_stage_emit_ts.get(stage, 0.0))
+                    if last_ts > 0 and (now_ts - last_ts) < float(ai_log_throttle_seconds):
+                        return
+                    _last_stage_emit_ts[stage] = float(now_ts)
+            except Exception:
+                pass
+
             orig_append(event)
             self.ai_log_count += 1
             if self.uploader is not None:
@@ -253,7 +281,7 @@ class AutonomousOrchestratorTest:
                 else:
                     self.upload_failed += 1
 
-        self.store.append = _append_and_upload  # type: ignore[method-assign]
+        self.store.append = _append_and_upload  
 
         bot_logger = logging.getLogger("auraquant.orch_test")
         prices = CachedTickPriceProvider(WeexRestMultiPriceProvider())
@@ -327,7 +355,7 @@ class AutonomousOrchestratorTest:
         except Exception:
             risk.max_position_notional_pct = 4.0
         risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.85"))  
-        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.75"))
+        risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.4"))
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 
@@ -456,13 +484,58 @@ class AutonomousOrchestratorTest:
                 now = datetime.now(timezone.utc).replace(tzinfo=None) 
 
                 warm_symbols = list(dict.fromkeys([self.correlation.lead_symbol, *self.symbols]))
-                self.prices.get_tick(warm_symbols, now=now)
+                warm_ticks = self.prices.get_tick(warm_symbols, now=now)
 
                 pos = self.execution.position()
                 max_hold_seconds = int(os.getenv("MAX_HOLD_SECONDS", "1800"))
                 if pos is not None and max_hold_seconds > 0:
-                    held_for = (now - pos.opened_at).total_seconds()
+
+                    if self._hold_anchor_symbol != str(pos.symbol) or self._hold_anchor_at is None:
+                        self._hold_anchor_symbol = str(pos.symbol)
+                        self._hold_anchor_at = pos.opened_at
+
+                    anchor = self._hold_anchor_at or pos.opened_at
+                    held_for = (now - anchor).total_seconds()
+
+                    last_price = None
+                    try:
+                        last_price = float((warm_ticks.get(str(pos.symbol)) or (0.0, 0.0))[0])
+                    except Exception:
+                        last_price = None
+
+                    pnl_pct = None
+                    try:
+                        entry = max(float(getattr(pos, "entry_price", 0.0) or 0.0), 1e-12)
+                        if last_price is not None and last_price > 0 and entry > 0:
+                            if str(getattr(pos, "side", "")).upper() == "SHORT":
+                                pnl_pct = (entry - float(last_price)) / entry * 100.0
+                            else:
+                                pnl_pct = (float(last_price) - entry) / entry * 100.0
+                    except Exception:
+                        pnl_pct = None
+
+                    # Optional: close immediately on any profit (can be noisy due to fees).
+                    close_on_any_profit = os.getenv("CLOSE_ON_ANY_PROFIT", "0") == "1"
+                    if close_on_any_profit and pnl_pct is not None and pnl_pct > 0:
+                        held_for = max(held_for, float(max_hold_seconds))
+
                     if held_for >= max_hold_seconds:
+                        max_hold_loss_extend = os.getenv("MAX_HOLD_LOSS_EXTEND", "0") == "1"
+                        max_hold_profit_force_close = os.getenv("MAX_HOLD_PROFIT_FORCE_CLOSE", "1") == "1"
+
+                        if pnl_pct is not None and pnl_pct <= 0 and max_hold_loss_extend:
+                            # Extend hold window: wait another MAX_HOLD_SECONDS before trying again.
+                            self._hold_anchor_at = now
+                            logger.warning(
+                                f"[MANAGE] Max hold exceeded but in loss (pnl_pct={pnl_pct:.3f}%). "
+                                f"Extending hold window by {max_hold_seconds}s."
+                            )
+                            continue
+
+                        close_reason = "MAX_HOLD"
+                        if pnl_pct is not None and pnl_pct > 0 and max_hold_profit_force_close:
+                            close_reason = "MAX_HOLD_PROFIT"
+
                         if hasattr(self.execution, "close_open_position_best_effort"):
                             logger.warning(
                                 f"[MANAGE] Max hold exceeded ({held_for:.0f}s >= {max_hold_seconds}s). "
@@ -497,14 +570,18 @@ class AutonomousOrchestratorTest:
                                                 input={
                                                     "symbol": str(getattr(pos, "symbol", "")),
                                                     "pnl_usdt": None if pnl is None else round(float(pnl), 6),
-                                                    "reason": "MAX_HOLD",
+                                                    "reason": close_reason,
                                                     "held_for_seconds": round(float(held_for), 2),
+                                                    "unrealized_pnl_pct": None if pnl_pct is None else round(float(pnl_pct), 4),
                                                 },
                                                 output={
                                                     "equity_now": round(float(self.execution.equity()), 6),
                                                     "trade_count": int(self.execution.trade_count()),
                                                 },
-                                                explanation="Force close due to MAX_HOLD_SECONDS.",
+                                                explanation=(
+                                                    "Force close due to MAX_HOLD_SECONDS." if close_reason == "MAX_HOLD" else
+                                                    "Force close on profit at MAX_HOLD_SECONDS."
+                                                ),
                                                 timestamp=now,
                                             )
                                         )
@@ -516,6 +593,10 @@ class AutonomousOrchestratorTest:
                                 )
                         else:
                             logger.warning("[MANAGE] Max hold exceeded but execution has no close method.")
+                else:
+
+                    self._hold_anchor_at = None
+                    self._hold_anchor_symbol = None
 
                 active_symbol = self._pick_active_symbol()
                 self.orchestrator.config.symbol = active_symbol
