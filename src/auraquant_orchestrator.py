@@ -234,6 +234,7 @@ class AutonomousOrchestratorTest:
 
         self._hold_anchor_at: datetime | None = None
         self._hold_anchor_symbol: str | None = None
+        self._hold_limit_seconds: int | None = None
 
         self.store = AiLogStore(log_file)
         self.uploader = make_uploader_from_env(queue_dir="ai_logs/.upload_queue")
@@ -452,7 +453,10 @@ class AutonomousOrchestratorTest:
     def run(self):
         """Run autonomous orchestrator test."""
         self.start_time = datetime.now(timezone.utc)
-        logger.info(f"[START] Running {self.duration_seconds}s autonomous orchestrator test")
+        if self.duration_seconds and self.duration_seconds > 0:
+            logger.info(f"[START] Running {self.duration_seconds}s autonomous orchestrator test")
+        else:
+            logger.info("[START] Running autonomous orchestrator (no duration limit)")
         logger.info(f"[START] Min trades required: {self.min_trades}")
         logger.info(f"[START] Start time: {self.start_time.isoformat()}")
 
@@ -476,7 +480,7 @@ class AutonomousOrchestratorTest:
                 logger.info(f"[PROGRESS] Agent running {elapsed_minutes} minutes")
                 last_progress_log = elapsed_minutes
 
-            if elapsed >= self.duration_seconds:
+            if self.duration_seconds and self.duration_seconds > 0 and elapsed >= self.duration_seconds:
                 logger.info(f"[END] Duration limit ({elapsed:.1f}s >= {self.duration_seconds}s)")
                 break
 
@@ -493,9 +497,12 @@ class AutonomousOrchestratorTest:
                     if self._hold_anchor_symbol != str(pos.symbol) or self._hold_anchor_at is None:
                         self._hold_anchor_symbol = str(pos.symbol)
                         self._hold_anchor_at = pos.opened_at
+                        self._hold_limit_seconds = None
 
                     anchor = self._hold_anchor_at or pos.opened_at
                     held_for = (now - anchor).total_seconds()
+
+                    hold_limit_seconds = int(self._hold_limit_seconds) if self._hold_limit_seconds else int(max_hold_seconds)
 
                     last_price = None
                     try:
@@ -517,18 +524,25 @@ class AutonomousOrchestratorTest:
                     # Optional: close immediately on any profit (can be noisy due to fees).
                     close_on_any_profit = os.getenv("CLOSE_ON_ANY_PROFIT", "0") == "1"
                     if close_on_any_profit and pnl_pct is not None and pnl_pct > 0:
-                        held_for = max(held_for, float(max_hold_seconds))
+                        held_for = max(held_for, float(hold_limit_seconds))
 
-                    if held_for >= max_hold_seconds:
+                    if held_for >= hold_limit_seconds:
                         max_hold_loss_extend = os.getenv("MAX_HOLD_LOSS_EXTEND", "0") == "1"
                         max_hold_profit_force_close = os.getenv("MAX_HOLD_PROFIT_FORCE_CLOSE", "1") == "1"
 
                         if pnl_pct is not None and pnl_pct <= 0 and max_hold_loss_extend:
-                            # Extend hold window: wait another MAX_HOLD_SECONDS before trying again.
+                            # Extend hold window: wait another configured window before trying again.
+                            try:
+                                extend_seconds = int(os.getenv("MAX_HOLD_LOSS_EXTEND_SECONDS", "600"))
+                            except Exception:
+                                extend_seconds = 600
+                            if extend_seconds <= 0:
+                                extend_seconds = 600
                             self._hold_anchor_at = now
+                            self._hold_limit_seconds = int(extend_seconds)
                             logger.warning(
                                 f"[MANAGE] Max hold exceeded but in loss (pnl_pct={pnl_pct:.3f}%). "
-                                f"Extending hold window by {max_hold_seconds}s."
+                                f"Extending hold window by {extend_seconds}s."
                             )
                             continue
 
@@ -538,7 +552,7 @@ class AutonomousOrchestratorTest:
 
                         if hasattr(self.execution, "close_open_position_best_effort"):
                             logger.warning(
-                                f"[MANAGE] Max hold exceeded ({held_for:.0f}s >= {max_hold_seconds}s). "
+                                f"[MANAGE] Max hold exceeded ({held_for:.0f}s >= {hold_limit_seconds}s). "
                                 "Attempting best-effort close."
                             )
                             equity_before = None
@@ -573,6 +587,7 @@ class AutonomousOrchestratorTest:
                                                     "reason": close_reason,
                                                     "held_for_seconds": round(float(held_for), 2),
                                                     "unrealized_pnl_pct": None if pnl_pct is None else round(float(pnl_pct), 4),
+                                                    "hold_limit_seconds": int(hold_limit_seconds),
                                                 },
                                                 output={
                                                     "equity_now": round(float(self.execution.equity()), 6),
@@ -597,6 +612,7 @@ class AutonomousOrchestratorTest:
 
                     self._hold_anchor_at = None
                     self._hold_anchor_symbol = None
+                    self._hold_limit_seconds = None
 
                 active_symbol = self._pick_active_symbol()
                 self.orchestrator.config.symbol = active_symbol
@@ -713,6 +729,11 @@ def main():
         help="Stop any running bot (via pidfile), disable Gemini calls, and force close positions/cancel orders, then exit.",
     )
     parser.add_argument(
+        "--forever",
+        action="store_true",
+        help="Run without duration limit (equivalent to --duration 0).",
+    )
+    parser.add_argument(
         "--duration",
         type=int,
         default=900,
@@ -746,6 +767,9 @@ def main():
         help="AI log file",
     )
     args = parser.parse_args()
+
+    if args.forever:
+        args.duration = 0
 
     symbols: list[str]
     if args.symbol:
