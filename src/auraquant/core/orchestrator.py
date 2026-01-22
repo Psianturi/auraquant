@@ -131,11 +131,12 @@ class Orchestrator:
             if self.learner is not None:
                 fv = self._open_features_by_symbol.pop(trade_closed.symbol, None)
                 if fv is not None:
-                    p_before, seen = self.learner.update(fv, is_win=trade_closed.is_win)  # type: ignore[arg-type]
+                    p_before, seen = self.learner.update(fv, is_win=trade_closed.is_win)
+                    self.learner.save() # --- PERSIST LEARNING ---
                     payload = {
                         "module": "Learner",
                         "timestamp": utc_iso(now),
-                        "event": "MODEL_UPDATED",
+                        "event": "MODEL_UPDATED_AND_SAVED",
                         "symbol": trade_closed.symbol,
                         "label_is_win": bool(trade_closed.is_win),
                         "p_win_before": round(float(p_before), 6),
@@ -293,12 +294,14 @@ class Orchestrator:
         if self.execution.position() is not None:
             return None
 
+        # --- CoinGecko Data Fetching & Feature Prep ---
         cg_client = CoinGeckoClient()
         cg_markets = []
         global_data = {}
         try:
-            allowed_cids = list(WEEX_BASE_TO_COINGECKO_ID.values())
-            cg_markets = cg_client.get_markets(ids=allowed_cids, ttl_seconds=180.0)
+            # Ensure we only request valid IDs from our map
+            all_known_ids = list(WEEX_BASE_TO_COINGECKO_ID.values())
+            cg_markets = cg_client.get_markets(ids=all_known_ids, ttl_seconds=180.0)
             global_data = cg_client.get_global(ttl_seconds=180.0)
         except Exception as e:
             log_json(self.logger, {"module": "Orchestrator", "event": "COINGECKO_FETCH_FAILED", "error": str(e)}, level=logging.ERROR)
