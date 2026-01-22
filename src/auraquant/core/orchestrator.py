@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from ..data.multi_price_provider import MultiPriceProvider
-from ..data.coingecko_client import CoinGeckoClient
+from ..data.coingecko_client import CoinGeckoClient, WEEX_BASE_TO_COINGECKO_ID
 from ..correlation import CorrelationTrigger
 from ..risk import RiskEngine, TradeIntent
 from ..sentiment import SentimentProcessor
