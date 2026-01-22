@@ -299,9 +299,14 @@ class Orchestrator:
         cg_markets = []
         global_data = {}
         try:
-            # Ensure we only request valid IDs from our map
-            all_known_ids = list(WEEX_BASE_TO_COINGECKO_ID.values())
-            cg_markets = cg_client.get_markets(ids=all_known_ids, ttl_seconds=180.0)
+            # BUG FIX: Explicitly filter to only include IDs that are in the WEEX_BASE_TO_COINGECKO_ID map
+            # This prevents sending invalid IDs to the CoinGecko API
+            symbols_in_use = self.config.symbols or [self.config.symbol]
+            cids_to_fetch = [cid for sym in symbols_in_use if (cid := WEEX_BASE_TO_COINGECKO_ID.get(sym.split('/')[0])) is not None]
+            
+            if cids_to_fetch:
+                cg_markets = cg_client.get_markets(ids=cids_to_fetch, ttl_seconds=180.0)
+            
             global_data = cg_client.get_global(ttl_seconds=180.0)
         except Exception as e:
             log_json(self.logger, {"module": "Orchestrator", "event": "COINGECKO_FETCH_FAILED", "error": str(e)}, level=logging.ERROR)
