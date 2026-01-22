@@ -293,50 +293,29 @@ class Orchestrator:
         if self.execution.position() is not None:
             return None
 
-        # --- CoinGecko Data Fetching ---
         cg_client = CoinGeckoClient()
-        trend_data = {}
+        cg_markets = []
+        global_data = {}
         try:
-            trend_data = cg_client.get_market_trend_filter(tick.symbol, ttl_seconds=180.0)
+            allowed_cids = list(WEEX_BASE_TO_COINGECKO_ID.values())
+            cg_markets = cg_client.get_markets(ids=allowed_cids, ttl_seconds=180.0)
+            global_data = cg_client.get_global(ttl_seconds=180.0)
         except Exception as e:
             log_json(self.logger, {"module": "Orchestrator", "event": "COINGECKO_FETCH_FAILED", "error": str(e)}, level=logging.ERROR)
+        
+        current_cid = WEEX_BASE_TO_COINGECKO_ID.get(tick.symbol.split('/')[0].upper())
+        current_market = next((m for m in cg_markets if m.id == current_cid), None)
         # --------------------------------
 
         effective_bias = report.bias
         use_momentum_override = os.getenv("USE_MOMENTUM_OVERRIDE", "1") == "1"
-        if use_momentum_override and report.bias == "NEUTRAL":
-            change_1h = float(trend_data.get("change_1h", 0.0))
+        if use_momentum_override and report.bias == "NEUTRAL" and current_market:
+            change_1h = float(current_market.price_change_percentage_1h or 0.0)
             
-            # If 1h drop > 0.8%, override to SHORT
             if change_1h < -0.8:
                 effective_bias = "SHORT"
-                payload = {
-                    "module": "Orchestrator",
-                    "timestamp": utc_iso(tick.now),
-                    "phase": BotPhase.QUALIFY.value,
-                    "symbol": tick.symbol,
-                    "event": "MOMENTUM_OVERRIDE",
-                    "original_bias": report.bias,
-                    "new_bias": "SHORT",
-                    "change_1h": round(change_1h, 2),
-                    "why": "1h momentum drop triggered SHORT override",
-                }
-                log_json(self.logger, payload, level=logging.INFO)
-            # If 1h gain > 0.8%, override to LONG
             elif change_1h > 0.8:
                 effective_bias = "LONG"
-                payload = {
-                    "module": "Orchestrator",
-                    "timestamp": utc_iso(tick.now),
-                    "phase": BotPhase.QUALIFY.value,
-                    "symbol": tick.symbol,
-                    "event": "MOMENTUM_OVERRIDE",
-                    "original_bias": report.bias,
-                    "new_bias": "LONG",
-                    "change_1h": round(change_1h, 2),
-                    "why": "1h momentum gain triggered LONG override",
-                }
-                log_json(self.logger, payload, level=logging.INFO)
 
         if effective_bias == "NEUTRAL":
             return None
@@ -353,34 +332,12 @@ class Orchestrator:
 
         # 24h Trend Filter - Block entries against strong trends
         use_trend_filter = os.getenv("USE_TREND_FILTER", "1") == "1"
-        if use_trend_filter and trend_data:
-            if signal.side == "LONG" and not trend_data.get("allow_long", True):
-                payload = {
-                    "module": "Orchestrator",
-                    "timestamp": utc_iso(tick.now),
-                    "phase": BotPhase.QUALIFY.value,
-                    "symbol": tick.symbol,
-                    "deny": "TREND_FILTER_BLOCKED_LONG",
-                    "trend": trend_data.get("trend"),
-                    "change_24h": round(trend_data.get("change_24h", 0), 2),
-                    "market_regime": trend_data.get("market_regime"),
-                }
-                log_json(self.logger, payload, level=logging.WARNING)
-                return None
-            
-            if signal.side == "SHORT" and not trend_data.get("allow_short", True):
-                payload = {
-                    "module": "Orchestrator",
-                    "timestamp": utc_iso(tick.now),
-                    "phase": BotPhase.QUALIFY.value,
-                    "symbol": tick.symbol,
-                    "deny": "TREND_FILTER_BLOCKED_SHORT",
-                    "trend": trend_data.get("trend"),
-                    "change_24h": round(trend_data.get("change_24h", 0), 2),
-                    "market_regime": trend_data.get("market_regime"),
-                }
-                log_json(self.logger, payload, level=logging.WARNING)
-                return None
+        if use_trend_filter and current_market:
+            change_24h = float(current_market.price_change_percentage_24h or 0.0)
+            block_threshold = float(os.getenv("TREND_BLOCK_THRESHOLD_PCT", "5.0"))
+            if (signal.side == "LONG" and change_24h < -block_threshold) or \
+               (signal.side == "SHORT" and change_24h > block_threshold):
+                return None # Deny trade
 
         if self.ai_log_store is not None:
             self.ai_log_store.append(
@@ -390,18 +347,13 @@ class Orchestrator:
                     input={
                         "symbol": tick.symbol,
                         "lead_symbol": self.correlation.lead_symbol,
-                        "window": self.correlation.window,
-                        "max_lag": self.correlation.max_lag,
-                        "threshold": self.correlation.corr_threshold,
                         "bias": report.bias,
                     },
                     output={
                         "side": signal.side,
                         "confidence": round(signal.confidence, 6),
-                        "lag": signal.lag,
-                        "corr": round(signal.corr, 6),
                     },
-                    explanation="Rolling return correlation confirmation; requires corr >= threshold.",
+                    explanation="Rolling return correlation confirmation.",
                     timestamp=tick.now,
                 )
             )
@@ -414,42 +366,23 @@ class Orchestrator:
         p_win = None
         if self.learner is not None:
             # Initialize with safe defaults
-            vol_rank = 0.5
-            price_change_rank = 0.5
-            btc_dominance = 50.0
-            total_mcap_change_pct = 0.0
+            vol_rank, price_change_rank = 0.5, 0.5
+            btc_dominance, total_mcap_change_pct = 50.0, 0.0
 
-            try:
-                # --- CoinGecko Market-wide Rank Features ---
-                allowed_cids = list(WEEX_BASE_TO_COINGECKO_ID.values())
-                cg_markets = cg_client.get_markets(ids=allowed_cids, ttl_seconds=180.0)
-
-                if cg_markets:
-                    valid_markets = [m for m in cg_markets if m.total_volume is not None and m.price_change_percentage_24h is not None]
+            if cg_markets:
+                valid_markets = [m for m in cg_markets if m.total_volume is not None and m.price_change_percentage_24h is not None]
+                if current_market and len(valid_markets) > 1:
                     vol_sorted = sorted(valid_markets, key=lambda m: m.total_volume or 0.0)
                     change_sorted = sorted(valid_markets, key=lambda m: m.price_change_percentage_24h or 0.0)
-                    current_cid = WEEX_BASE_TO_COINGECKO_ID.get(tick.symbol.split('/')[0].upper())
-                    current_market = next((m for m in valid_markets if m.id == current_cid), None)
+                    vol_idx = next((i for i, m in enumerate(vol_sorted) if m.id == current_market.id), -1)
+                    change_idx = next((i for i, m in enumerate(change_sorted) if m.id == current_market.id), -1)
+                    if vol_idx != -1: vol_rank = vol_idx / (len(valid_markets) - 1)
+                    if change_idx != -1: price_change_rank = change_idx / (len(valid_markets) - 1)
 
-                    if current_market and len(vol_sorted) > 1:
-                        vol_idx = next((i for i, m in enumerate(vol_sorted) if m.id == current_market.id), -1)
-                        if vol_idx != -1:
-                            vol_rank = vol_idx / (len(vol_sorted) - 1)
-
-                    if current_market and len(change_sorted) > 1:
-                        change_idx = next((i for i, m in enumerate(change_sorted) if m.id == current_market.id), -1)
-                        if change_idx != -1:
-                            price_change_rank = change_idx / (len(change_sorted) - 1)
-
-                # --- CoinGecko Global / Market Regime Features ---
-                global_data = cg_client.get_global(ttl_seconds=180.0)
-                if global_data and isinstance(global_data.get('data'), dict):
-                    g_data = global_data['data']
-                    btc_dominance = float(g_data.get('market_cap_percentage', {}).get('btc', 50.0))
-                    total_mcap_change_pct = float(g_data.get('market_cap_change_percentage_24h_usd', 0.0))
-
-            except Exception as e:
-                log_json(self.logger, {"module": "Orchestrator", "event": "COINGECKO_FEATURE_FAILED", "error": str(e)}, level=logging.ERROR)
+            if global_data and isinstance(global_data.get('data'), dict):
+                g_data = global_data['data']
+                btc_dominance = float(g_data.get('market_cap_percentage', {}).get('btc', 50.0))
+                total_mcap_change_pct = float(g_data.get('market_cap_change_percentage_24h_usd', 0.0))
 
             fv = extract_features(
                 side=signal.side,
