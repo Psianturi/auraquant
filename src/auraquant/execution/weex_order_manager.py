@@ -110,6 +110,7 @@ class WeexOrderManager(BaseOrderManager):
         self._position: Optional[WeexLivePosition] = None
         self._positions_opened: int = 0
         self._trades_closed: int = 0
+        self._pending_trade_result: Optional[TradeResult] = None
         # Cache: {weex_symbol: (min_order_size, step_size)}
         self._contract_rules_cache: Dict[str, Tuple[Optional[float], float]] = {}
         # Track last close attempt to prevent spam
@@ -134,6 +135,12 @@ class WeexOrderManager(BaseOrderManager):
         self._cleanup_stale_orders_on_start()
         
         self.reconcile(now=datetime.utcnow())
+
+    def pop_pending_trade_result(self) -> Optional[TradeResult]:
+
+        tr = self._pending_trade_result
+        self._pending_trade_result = None
+        return tr
     
     def _cleanup_stale_orders_on_start(self) -> None:
         """Cancel pending orders on startup to free locked margin.
@@ -831,7 +838,11 @@ class WeexOrderManager(BaseOrderManager):
             return None
 
     def reconcile(self, now: Optional[datetime] = None) -> None:
-        _ = now
+        if now is None:
+            now = datetime.utcnow()
+
+        equity_before = float(self._equity)
+        pos_before = self._position if (self._position is not None and self._position.is_open) else None
         # Keep startup strict (so init/health checks fail fast), but when the bot
         # is already running, avoid hammering the assets endpoint during exchange
         # instability (e.g. HTTP 521/5xx).
@@ -890,7 +901,16 @@ class WeexOrderManager(BaseOrderManager):
             weex_symbol = self._position.weex_symbol
             if weex_symbol:
                 try:
-                    self._sync_position_from_weex(weex_symbol=weex_symbol)
+                    sync = self._sync_position_from_weex(weex_symbol=weex_symbol)
+
+                    if sync is True and pos_before is not None and self._pending_trade_result is None:
+                        pnl = float(self._equity - equity_before)
+                        self._pending_trade_result = TradeResult(
+                            symbol=pos_before.symbol,
+                            pnl_usdt=pnl,
+                            closed_at=now,
+                            order_id=pos_before.order_id,
+                        )
                 except Exception as e:
                     logger.debug(f"[WEEX] Position sync during reconcile failed: {e}")
 

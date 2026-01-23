@@ -123,7 +123,15 @@ class Orchestrator:
         tick = TickContext(now=now, symbol=symbol, last_price=last_price, atr=atr)
 
         # Always let execution layer process SL/TP first
+        trade_closed_source = "SL/TP"
         trade_closed = self.execution.on_price_tick(symbol=symbol, price=last_price, now=now)
+        if trade_closed is None and hasattr(self.execution, "pop_pending_trade_result"):
+            try:
+                trade_closed = self.execution.pop_pending_trade_result()  
+                if trade_closed is not None:
+                    trade_closed_source = "SYNC"
+            except Exception:
+                trade_closed = None
         if trade_closed is not None:
        
             self.risk.update_account_state(equity_now=self.execution.equity(), trade_result=trade_closed, now=now)
@@ -186,7 +194,11 @@ class Orchestrator:
                             "equity_now": round(self.execution.equity(), 6),
                             "trade_count": self.execution.trade_count(),
                         },
-                        explanation="Position closed (SL/TP). Realized PnL applied to equity.",
+                        explanation=(
+                            "Position closed (SL/TP). Realized PnL applied to equity."
+                            if trade_closed_source == "SL/TP"
+                            else "Position closed (exchange sync). Realized PnL applied to equity."
+                        ),
                         order_id=order_id_int,
                         timestamp=now,
                     )
@@ -300,7 +312,6 @@ class Orchestrator:
         global_data = {}
         try:
             # BUG FIX: Explicitly filter to only include IDs that are in the WEEX_BASE_TO_COINGECKO_ID map
-            # This prevents sending invalid IDs to the CoinGecko API
             symbols_in_use = getattr(self.config, "symbols", None) or [self.config.symbol]
             cids_to_fetch = [cid for sym in symbols_in_use if (cid := WEEX_BASE_TO_COINGECKO_ID.get(sym.split('/')[0])) is not None]
             
@@ -373,7 +384,6 @@ class Orchestrator:
         # Note: ML never bypasses RiskEngine; it only adjusts *intent confidence*.
         p_win = None
         if self.learner is not None:
-            # Initialize with safe defaults
             vol_rank, price_change_rank = 0.5, 0.5
             btc_dominance, total_mcap_change_pct = 50.0, 0.0
 
