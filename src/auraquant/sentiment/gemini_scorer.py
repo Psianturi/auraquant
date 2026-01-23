@@ -36,7 +36,7 @@ class GeminiScorer:
     """
     
     api_key: Optional[str] = None
-    model_name: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+    model_name: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
     _client: Optional[Any] = field(default=None, init=False, repr=False)
     _initialized: bool = field(default=False, init=False, repr=False)
     _use_new_sdk: bool = field(default=False, init=False, repr=False)
