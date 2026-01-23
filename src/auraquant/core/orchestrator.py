@@ -301,7 +301,7 @@ class Orchestrator:
         try:
             # BUG FIX: Explicitly filter to only include IDs that are in the WEEX_BASE_TO_COINGECKO_ID map
             # This prevents sending invalid IDs to the CoinGecko API
-            symbols_in_use = self.config.symbols or [self.config.symbol]
+            symbols_in_use = getattr(self.config, "symbols", None) or [self.config.symbol]
             cids_to_fetch = [cid for sym in symbols_in_use if (cid := WEEX_BASE_TO_COINGECKO_ID.get(sym.split('/')[0])) is not None]
             
             if cids_to_fetch:
