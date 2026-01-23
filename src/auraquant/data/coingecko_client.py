@@ -167,12 +167,22 @@ class CoinGeckoClient:
             "per_page": int(per_page),
             "page": 1,
             "sparkline": "false",
-            "price_change_percentage": "1h,24h",
+            "price_change_percentage": "1h,24h",  # Request both 1h and 24h price changes
         }
 
         assert self.session is not None
-        resp = self.session.get(url, params=params, headers=self._headers(), timeout=float(self.timeout_seconds))
-        resp.raise_for_status()
+        try:
+            resp = self.session.get(url, params=params, headers=self._headers(), timeout=float(self.timeout_seconds))
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+
+            if e.response.status_code == 400 and "price_change_percentage" in str(e):
+                params.pop("price_change_percentage", None)
+                resp = self.session.get(url, params=params, headers=self._headers(), timeout=float(self.timeout_seconds))
+                resp.raise_for_status()
+            else:
+                raise
+        
         data = resp.json()
         if not isinstance(data, list):
             raise ValueError("Unexpected CoinGecko response")

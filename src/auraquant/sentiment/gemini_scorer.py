@@ -251,6 +251,7 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
         try:
             logger.debug(f"[GeminiScorer] Raw response: {raw_text[:200]}")
             
+            # Extract JSON from markdown code blocks or cleanup response
             if "```" in raw_text:
                 parts = raw_text.split("```")
                 for part in parts:
@@ -260,6 +261,14 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
                     if part.startswith("{"):
                         raw_text = part
                         break
+            
+            raw_text = raw_text.strip()
+            if not raw_text.startswith("{"):
+                # Try to find JSON object within the text
+                start_idx = raw_text.find("{")
+                end_idx = raw_text.rfind("}")
+                if start_idx != -1 and end_idx != -1:
+                    raw_text = raw_text[start_idx:end_idx+1]
             
             result = json.loads(raw_text)
             
