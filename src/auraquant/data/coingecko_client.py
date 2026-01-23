@@ -76,6 +76,24 @@ class _DiskCache:
         except Exception:
             return None
 
+    def get_json_allow_stale(self, key: str) -> Optional[Any]:
+        """Return cached data even if TTL expired.
+
+        Used as a resilience fallback when the upstream API temporarily rejects
+        requests (e.g., HTTP 400/429) but stale data is better than none.
+        """
+
+        p = self._path_for_key(key)
+        if not p.exists():
+            return None
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(obj, dict):
+                return None
+            return obj.get("data")
+        except Exception:
+            return None
+
     def set_json(self, key: str, data: Any) -> None:
         p = self._path_for_key(key)
         payload = {"saved_at": time.time(), "data": data}
@@ -150,7 +168,7 @@ class CoinGeckoClient:
     ) -> List[CoinGeckoMarket]:
         """Fetch /coins/markets for a fixed set of IDs with caching."""
 
-        ids_list = [str(i).strip() for i in ids if str(i).strip()]
+        ids_list = [str(i).strip().lower() for i in ids if str(i).strip()]
         ids_key = ",".join(sorted(ids_list))
         cache_key = f"markets_{vs_currency}_{ids_key}"
 
@@ -160,28 +178,63 @@ class CoinGeckoClient:
             return [CoinGeckoMarket.from_json(x) for x in cached if isinstance(x, dict)]
 
         url = f"{self.base_url}/coins/markets"
-        params = {
+
+        params_primary = {
             "vs_currency": vs_currency,
             "ids": ids_key,
             "order": "market_cap_desc",
             "per_page": int(per_page),
             "page": 1,
             "sparkline": "false",
-            "price_change_percentage": "1h,24h",  # Request both 1h and 24h price changes
+            "price_change_percentage": "1h,24h",
         }
+        params_fallback_1 = dict(params_primary)
+        params_fallback_1.pop("price_change_percentage", None)
+        params_fallback_2 = {
+            "vs_currency": vs_currency,
+            "ids": ids_key,
+            "sparkline": "false",
+        }
+        params_fallback_3 = {
+            "vs_currency": vs_currency,
+            "ids": ids_key,
+        }
+        param_candidates = (params_primary, params_fallback_1, params_fallback_2, params_fallback_3)
 
         assert self.session is not None
-        try:
-            resp = self.session.get(url, params=params, headers=self._headers(), timeout=float(self.timeout_seconds))
-            resp.raise_for_status()
-        except requests.exceptions.HTTPError as e:
+        last_exc: Optional[Exception] = None
+        resp: Optional[requests.Response] = None
 
-            if e.response.status_code == 400 and "price_change_percentage" in str(e):
-                params.pop("price_change_percentage", None)
-                resp = self.session.get(url, params=params, headers=self._headers(), timeout=float(self.timeout_seconds))
-                resp.raise_for_status()
-            else:
-                raise
+        for p in param_candidates:
+            try:
+                r = self.session.get(url, params=p, headers=self._headers(), timeout=float(self.timeout_seconds))
+                if r.status_code == 400:
+                    # Try a simpler parameter set.
+                    last_exc = requests.exceptions.HTTPError(
+                        f"400 Client Error: Bad Request for url: {r.url}", response=r
+                    )
+                    continue
+                r.raise_for_status()
+                resp = r
+                break
+            except requests.exceptions.HTTPError as e:
+                last_exc = e
+                # For non-400 errors (429/5xx/etc), stop retrying param variants.
+                if getattr(e.response, "status_code", None) != 400:
+                    break
+            except Exception as e:
+                last_exc = e
+                break
+
+        if resp is None:
+            # Last resort: use stale cache if available.
+            assert self.cache is not None
+            cached_stale = self.cache.get_json_allow_stale(cache_key)
+            if isinstance(cached_stale, list):
+                return [CoinGeckoMarket.from_json(x) for x in cached_stale if isinstance(x, dict)]
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("CoinGecko markets request failed")
         
         data = resp.json()
         if not isinstance(data, list):
