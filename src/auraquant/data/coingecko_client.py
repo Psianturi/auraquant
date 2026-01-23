@@ -144,14 +144,12 @@ class CoinGeckoClient:
         if self.session is None:
             self.session = requests.Session()
 
-    def _headers(self) -> Dict[str, str]:
-        # CoinGecko keys:
-
+    def _headers(self, *, include_key: bool = True) -> Dict[str, str]:
         headers: Dict[str, str] = {
             "Accept": "application/json",
             "User-Agent": "AuraQuant/1.0 (CoinGecko Track)",
         }
-        if self.api_key:
+        if include_key and self.api_key:
             if self.api_key.startswith("CG-"):
                 headers["x-cg-demo-api-key"] = self.api_key
             else:
@@ -257,10 +255,37 @@ class CoinGeckoClient:
             return cached
 
         url = f"{self.base_url}/search/trending"
-        
+
         assert self.session is not None
-        resp = self.session.get(url, headers=self._headers(), timeout=float(self.timeout_seconds))
-        resp.raise_for_status()
+        resp: Optional[requests.Response] = None
+        last_exc: Optional[Exception] = None
+
+
+        for hdrs in (self._headers(include_key=True), self._headers(include_key=False)):
+            try:
+                r = self.session.get(url, headers=hdrs, timeout=float(self.timeout_seconds))
+                r.raise_for_status()
+                resp = r
+                break
+            except requests.exceptions.HTTPError as e:
+                last_exc = e
+                # If it's not a client error, don't keep retrying.
+                sc = getattr(e.response, "status_code", None)
+                if sc is not None and int(sc) >= 500:
+                    break
+            except Exception as e:
+                last_exc = e
+                break
+
+        if resp is None:
+            # Last resort: use stale cache.
+            cached_stale = self.cache.get_json_allow_stale(cache_key)
+            if isinstance(cached_stale, dict):
+                return cached_stale
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("CoinGecko trending request failed")
+
         data = resp.json()
         if not isinstance(data, dict):
             raise ValueError("Unexpected CoinGecko trending response")
@@ -278,11 +303,51 @@ class CoinGeckoClient:
         if isinstance(cached, dict):
             return cached
 
-        url = f"{self.base_url}/global"
-        
+        if os.getenv("COINGECKO_DISABLE_GLOBAL", "0") == "1":
+
+            cached_stale = self.cache.get_json_allow_stale(cache_key)
+            if isinstance(cached_stale, dict):
+                return cached_stale
+            return {}
+
+        url_primary = f"{self.base_url}/global"
+        url_public = f"{PUBLIC_API_BASE_URL}/global"
+
         assert self.session is not None
-        resp = self.session.get(url, headers=self._headers(), timeout=float(self.timeout_seconds))
-        resp.raise_for_status()
+        resp: Optional[requests.Response] = None
+        last_exc: Optional[Exception] = None
+
+
+        variants = (
+            (url_primary, self._headers(include_key=True)),
+            (url_primary, self._headers(include_key=False)),
+            (url_public, self._headers(include_key=False)),
+        )
+
+        for url, hdrs in variants:
+            try:
+                r = self.session.get(url, headers=hdrs, timeout=float(self.timeout_seconds))
+                r.raise_for_status()
+                resp = r
+                break
+            except requests.exceptions.HTTPError as e:
+                last_exc = e
+                sc = getattr(e.response, "status_code", None)
+                # Continue on 400/401/403 (often key/header issues). Stop on 5xx.
+                if sc is not None and int(sc) >= 500:
+                    break
+            except Exception as e:
+                last_exc = e
+                break
+
+        if resp is None:
+            cached_stale = self.cache.get_json_allow_stale(cache_key)
+            if isinstance(cached_stale, dict):
+                return cached_stale
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("CoinGecko global request failed")
+
         data = resp.json()
         if not isinstance(data, dict):
             raise ValueError("Unexpected CoinGecko global response")
