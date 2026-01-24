@@ -685,7 +685,7 @@ class Orchestrator:
                 return
 
         try:
-            self.execution.open_position(
+            opened_pos = self.execution.open_position(
                 symbol=tick.symbol,
                 side=decision.side,
                 entry_price=decision.entry_price,
@@ -724,6 +724,7 @@ class Orchestrator:
             if fv is not None:
                 self._open_features_by_symbol[tick.symbol] = fv
 
+        order_id = getattr(opened_pos, "order_id", None) if opened_pos else None
         payload2 = {
             "module": "Orchestrator",
             "timestamp": utc_iso(tick.now),
@@ -735,25 +736,35 @@ class Orchestrator:
             "take_profit": decision.take_profit,
             "notional_usdt": decision.position_notional_usdt,
         }
+        if order_id is not None:
+            payload2["order_id"] = str(order_id)
         log_json(self.logger, payload2, level=logging.INFO)
 
-        if self.ai_log_store is not None:
-            self.ai_log_store.append(
-                AiLogEvent(
-                    stage="EXECUTION",
-                    model=f"AuraQuant.{type(self.execution).__name__}",
-                    input={
-                        "symbol": tick.symbol,
-                        "side": decision.side,
-                        "entry_price": decision.entry_price,
-                        "stop_loss": decision.stop_loss,
-                        "take_profit": decision.take_profit,
-                        "notional_usdt": decision.position_notional_usdt,
-                    },
-                    output={"opened": True},
-                    explanation="Execution layer opened a position.",
-                    timestamp=tick.now,
-                )
+        # Get order_id from the opened position if available
+        order_id = None
+        try:
+            pos = self.execution.position()
+            if pos is not None and hasattr(pos, "order_id"):
+                order_id = getattr(pos, "order_id", None)
+        except Exception:
+            pass
+
+        if self.ai_log_store is not None or self.ai_log_uploader is not None:
+            self._push_ai_log(
+                stage="EXECUTION",
+                model=f"AuraQuant.{type(self.execution).__name__}",
+                input_dict={
+                    "symbol": tick.symbol,
+                    "side": decision.side,
+                    "entry_price": decision.entry_price,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit": decision.take_profit,
+                    "notional_usdt": decision.position_notional_usdt,
+                },
+                output_dict={"opened": True},
+                explanation="Execution layer opened a position.",
+                order_id=order_id,
+                timestamp=tick.now,
             )
 
     def _manage(self, tick: TickContext) -> None:
