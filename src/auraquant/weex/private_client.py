@@ -84,3 +84,41 @@ class WeexPrivateRestClient:
         headers = self._headers(ts, sig)
         url = f"{self.base_url}{path}{query}"
         return self._session.post(url, headers=headers, data=body, timeout=self.timeout_seconds)
+
+    def get_funding_rate(self, contract_symbol: str) -> Optional[float]:
+        """Best-effort fetch of funding rate for a WEEX contract symbol.
+
+        Endpoint path can vary; override via env `WEEX_FUNDING_RATE_PATH`.
+        Returns funding rate as percentage if parsable, else None.
+        """
+        path = os.getenv("WEEX_FUNDING_RATE_PATH", "/quote/v1/fundingRate")
+        sym = str(contract_symbol).lower().strip()
+        query = f"?symbol={sym}"
+        try:
+            r = self.signed_get(path=path, query=query)
+            r.raise_for_status()
+            data = r.json()
+            # Try common shapes
+            if isinstance(data, dict):
+                # Direct field
+                for k in ("fundingRate", "funding_rate", "rate"):
+                    v = data.get(k)
+                    if v is not None:
+                        try:
+                            return float(v)
+                        except Exception:
+                            pass
+                # Nested list or dict
+                for v in data.values():
+                    if isinstance(v, list) and v:
+                        item = v[0]
+                        if isinstance(item, dict):
+                            for k2 in ("fundingRate", "funding_rate", "rate"):
+                                if item.get(k2) is not None:
+                                    try:
+                                        return float(item[k2])
+                                    except Exception:
+                                        pass
+            return None
+        except Exception:
+            return None

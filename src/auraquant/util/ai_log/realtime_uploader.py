@@ -130,6 +130,104 @@ class RealTimeAiLogUploader:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
+    def _sanitize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Sanitize and down-scope payload to metadata-only if configured.
+
+        Env controls:
+        - AI_LOG_UPLOAD_MODE: 'metadata' | 'full' (default 'metadata')
+        - AI_LOG_MASK_SENSITIVE: '1' to mask sensitive fields
+        - AI_LOG_LEVEL: optional level string added to payload
+        - AI_LOG_UPLOAD_STAGES: comma list of stages to allow (default: all)
+        """
+        mode = os.getenv("AI_LOG_UPLOAD_MODE", "metadata").lower().strip()
+        mask = os.getenv("AI_LOG_MASK_SENSITIVE", "1") == "1"
+        level = os.getenv("AI_LOG_LEVEL")
+
+        stage = str(payload.get("stage", "")).upper()
+        allow_stages = os.getenv("AI_LOG_UPLOAD_STAGES")
+        if allow_stages:
+            allowed = {s.strip().upper() for s in allow_stages.split(",") if s.strip()}
+            if stage and stage not in allowed:
+                # Return a minimal heartbeat event instead of dropping completely
+                return {
+                    "stage": stage,
+                    "model": str(payload.get("model", "AuraQuant")),
+                    "input": {"heartbeat": True},
+                    "output": {},
+                    "explanation": "Filtered by AI_LOG_UPLOAD_STAGES",
+                    "orderId": payload.get("orderId"),
+                }
+
+        if level:
+            # Add level as part of input metadata (safer for API)
+            inp = payload.get("input") or {}
+            if isinstance(inp, dict):
+                inp["level"] = level
+                payload["input"] = inp
+
+        if mode != "metadata":
+            return payload
+
+        def _round(v: Any) -> Any:
+            try:
+                f = float(v)
+                # round to 4 decimals for stability
+                return round(f, 4)
+            except Exception:
+                return v
+
+        # Build metadata-only input/output
+        safe_input: Dict[str, Any] = {}
+        safe_output: Dict[str, Any] = {}
+
+        inp = payload.get("input") or {}
+        outp = payload.get("output") or {}
+        if isinstance(inp, dict):
+            for k in ("symbol", "price", "atr", "phase", "intent", "equity_now"):
+                if k in inp:
+                    v = inp[k]
+                    if isinstance(v, (int, float)):
+                        v = _round(v)
+                    safe_input[k] = v
+            # Add coarse buckets to avoid precise strategy leakage
+            if "price" in safe_input:
+                try:
+                    p = float(safe_input["price"]) if safe_input["price"] is not None else None
+                    if p:
+                        safe_input["price_bucket"] = int(p // 10) * 10
+                except Exception:
+                    pass
+            if "atr" in safe_input and safe_input.get("price"):
+                try:
+                    atr = float(safe_input["atr"]) or 0.0
+                    price = float(safe_input["price"]) or 1.0
+                    safe_input["atr_pct_bucket"] = _round((atr / price) * 100.0)
+                except Exception:
+                    pass
+
+        if isinstance(outp, dict):
+            for k in ("confidence", "allowed", "decision", "reason", "trade_count", "positions_opened", "trades_closed"):
+                if k in outp:
+                    v = outp[k]
+                    if isinstance(v, (int, float)):
+                        v = _round(v)
+                    safe_output[k] = v
+
+        exp = str(payload.get("explanation", ""))
+        if mask:
+            # Strip detailed reasoning
+            exp = exp[:200]
+
+        sanitized = {
+            "orderId": payload.get("orderId"),
+            "stage": payload.get("stage"),
+            "model": payload.get("model"),
+            "input": safe_input,
+            "output": safe_output,
+            "explanation": exp,
+        }
+        return sanitized
+
     def start(self) -> None:
         """Start background retry thread."""
         if self._background_thread is not None:
@@ -161,7 +259,8 @@ class RealTimeAiLogUploader:
             True if successfully uploaded, False if queued for retry.
         """
         try:
-            return self._upload_sync(event_payload)
+            sanitized = self._sanitize_payload(event_payload)
+            return self._upload_sync(sanitized)
         except Exception as e:
             logger.warning(f"[AI Log Uploader] Upload failed (will retry): {e}")
             # Queue for retry

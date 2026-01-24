@@ -293,6 +293,60 @@ class CoinGeckoClient:
         self.cache.set_json(cache_key, data)
         return data
 
+    def get_avg_volume_usd(self, coin_id: str, days: int = 7, ttl_seconds: float = 600.0) -> Optional[float]:
+        """Return average total volume (USD) over the past N days using market_chart.
+        """
+        coin_id = str(coin_id or "").strip().lower()
+        if not coin_id:
+            return None
+
+        cache_key = f"market_chart_vol_{coin_id}_{int(days)}"
+
+        assert self.cache is not None
+        cached = self.cache.get_json(cache_key, ttl_seconds=float(ttl_seconds))
+        if isinstance(cached, dict):
+            vals = cached.get("total_volumes")
+            if isinstance(vals, list) and vals:
+                try:
+                    nums = [float(v[1]) for v in vals if isinstance(v, list) and len(v) >= 2]
+                    nums = [n for n in nums if n > 0]
+                    if nums:
+                        return float(sum(nums) / len(nums))
+                except Exception:
+                    return None
+
+        url = f"{self.base_url}/coins/{coin_id}/market_chart"
+        params = {"vs_currency": "usd", "days": int(days)}
+
+        assert self.session is not None
+        try:
+            r = self.session.get(url, params=params, headers=self._headers(), timeout=float(self.timeout_seconds))
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict):
+                # Cache raw payload (for allow-stale fallback later)
+                self.cache.set_json(cache_key, data)
+                vals = data.get("total_volumes")
+                if isinstance(vals, list) and vals:
+                    nums = [float(v[1]) for v in vals if isinstance(v, list) and len(v) >= 2]
+                    nums = [n for n in nums if n > 0]
+                    if nums:
+                        return float(sum(nums) / len(nums))
+        except Exception:
+            # Fallback: stale cache if available
+            try:
+                stale = self.cache.get_json_allow_stale(cache_key)
+                if isinstance(stale, dict):
+                    vals = stale.get("total_volumes")
+                    if isinstance(vals, list) and vals:
+                        nums = [float(v[1]) for v in vals if isinstance(v, list) and len(v) >= 2]
+                        nums = [n for n in nums if n > 0]
+                        if nums:
+                            return float(sum(nums) / len(nums))
+            except Exception:
+                return None
+        return None
+
     def get_global(self, ttl_seconds: float = 300.0) -> Dict[str, Any]:
         """Fetch /global for total market cap, BTC dominance, etc.
         """

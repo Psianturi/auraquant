@@ -17,7 +17,9 @@ from ..execution.base_order_manager import BaseOrderManager
 from ..util.ai_log.store import AiLogEvent, AiLogStore
 from ..util.ai_log.realtime_uploader import RealTimeAiLogUploader
 from ..weex import is_allowed_contract_symbol, to_weex_contract_symbol
+from ..weex.private_client import WeexPrivateRestClient
 from ..learning import TradePolicyLearner, extract_features
+from ..learning.stats import TradeStatsStore
 
 from .types import BotPhase, OrchestratorConfig, PositionSnapshot, ReconcileSnapshot, TickContext
 
@@ -50,6 +52,7 @@ class Orchestrator:
 
     ai_log_store: Optional[AiLogStore] = None
     ai_log_uploader: Optional[RealTimeAiLogUploader] = None
+    stats: Optional[TradeStatsStore] = None
 
     phase: BotPhase = BotPhase.SCAN
     last_entry_at: Optional[datetime] = None
@@ -141,6 +144,14 @@ class Orchestrator:
                 if fv is not None:
                     p_before, seen = self.learner.update(fv, is_win=trade_closed.is_win)
                     self.learner.save() # --- PERSIST LEARNING ---
+                    # Update per-symbol stats (wins/losses)
+                    try:
+                        if self.stats is None:
+                            self.stats = TradeStatsStore()
+                        self.stats.record(symbol=trade_closed.symbol, is_win=bool(trade_closed.is_win))
+                        self.stats.save()
+                    except Exception:
+                        pass
                     payload = {
                         "module": "Learner",
                         "timestamp": utc_iso(now),
@@ -268,17 +279,15 @@ class Orchestrator:
         }
         log_json(self.logger, payload, level=logging.INFO)
 
-        if self.ai_log_store is not None:
+        if self.ai_log_store is not None or self.ai_log_uploader is not None:
             explanation = gemini_reasoning if gemini_reasoning else "Heuristic sentiment scoring with dedup + half-life decay."
-            self.ai_log_store.append(
-                AiLogEvent(
-                    stage=BotPhase.SCAN.value,
-                    model=gemini_model,
-                    input={"symbol": tick.symbol, "limit": 5, "price": tick.last_price},
-                    output={"bias": report.bias, "score": round(report.score, 6)},
-                    explanation=explanation[:1000], 
-                    timestamp=tick.now,
-                )
+            self._push_ai_log(
+                stage=BotPhase.SCAN.value,
+                model=gemini_model,
+                input_dict={"symbol": tick.symbol, "limit": 5, "price": tick.last_price, "phase": BotPhase.SCAN.value},
+                output_dict={"bias": report.bias, "score": round(report.score, 6)},
+                explanation=explanation[:1000],
+                timestamp=tick.now,
             )
 
     def _qualify(self, tick: TickContext) -> Optional[TradeIntent]:
@@ -393,31 +402,52 @@ class Orchestrator:
                (signal.side == "SHORT" and change_24h > block_threshold):
                 return None # Deny trade
 
-        if self.ai_log_store is not None:
+        # Volume ratio filter: block when 24h volume is too low relative to 7d average
+        if current_market and os.getenv("USE_VOLUME_FILTER", "1") == "1":
+            try:
+                min_ratio = float(os.getenv("VOLUME_MIN_RATIO_7D", "0.35"))
+            except Exception:
+                min_ratio = 0.35
+            try:
+                current_cid = WEEX_BASE_TO_COINGECKO_ID.get(tick.symbol.split('/')[0].upper())
+                avg7 = None
+                if current_cid:
+                    avg7 = cg_client.get_avg_volume_usd(coin_id=current_cid, days=int(float(os.getenv("VOLUME_AVG_DAYS", "7"))), ttl_seconds=600.0)
+                vol24 = float(current_market.total_volume or 0.0)
+                if avg7 and avg7 > 0 and vol24 < (avg7 * min_ratio):
+                    payload = {
+                        "module": "Orchestrator",
+                        "timestamp": utc_iso(tick.now),
+                        "phase": BotPhase.QUALIFY.value,
+                        "symbol": tick.symbol,
+                        "deny": "VOLUME_TOO_LOW",
+                        "metrics": {"vol_24h": round(vol24, 2), "avg_vol_7d": round(avg7, 2), "min_ratio": min_ratio},
+                    }
+                    log_json(self.logger, payload, level=logging.WARNING)
+                    return None
+            except Exception:
+                pass
+
+        if self.ai_log_store is not None or self.ai_log_uploader is not None:
             ai_input = {
                 "symbol": tick.symbol,
                 "lead_symbol": self.correlation.lead_symbol,
                 "bias": report.bias,
                 "effective_bias": effective_bias,
+                "phase": BotPhase.QUALIFY.value,
             }
             if current_market:
                 ai_input["price_position_24h"] = round(price_position_24h, 3)
                 ai_input["price_24h_high"] = current_market.high_24h
                 ai_input["price_24h_low"] = current_market.low_24h
                 ai_input["price_current"] = current_market.current_price
-            
-            self.ai_log_store.append(
-                AiLogEvent(
-                    stage=BotPhase.QUALIFY.value,
-                    model="AuraQuant.CorrelationTrigger",
-                    input=ai_input,
-                    output={
-                        "side": signal.side,
-                        "confidence": round(signal.confidence, 6),
-                    },
-                    explanation="Rolling return correlation confirmation.",
-                    timestamp=tick.now,
-                )
+            self._push_ai_log(
+                stage=BotPhase.QUALIFY.value,
+                model="AuraQuant.CorrelationTrigger",
+                input_dict=ai_input,
+                output_dict={"side": signal.side, "confidence": round(signal.confidence, 6)},
+                explanation="Rolling return correlation confirmation.",
+                timestamp=tick.now,
             )
 
         # Combine confidence: sentiment strength * correlation strength
@@ -463,6 +493,63 @@ class Orchestrator:
             p_win = p
             confidence = float(min(max(confidence * (0.5 + 0.5 * p), 0.0), 1.0))
             self._qualified_features_by_symbol[tick.symbol] = fv
+
+
+        if os.getenv("USE_SYMBOL_WINRATE_MULT", "1") == "1":
+            try:
+                if self.stats is None:
+                    self.stats = TradeStatsStore()
+                wr = self.stats.win_rate(symbol=tick.symbol)
+                # Map win rate [0,1] to multiplier in [min,max]
+                rng = os.getenv("SYMBOL_WINRATE_CONF_RANGE", "0.8,1.2").split(",")
+                lo = float(rng[0]) if len(rng) > 0 else 0.8
+                hi = float(rng[1]) if len(rng) > 1 else 1.2
+                lo, hi = float(min(lo, hi)), float(max(lo, hi))
+                mult = lo + (hi - lo) * float(max(min(wr, 1.0), 0.0))
+                confidence = float(min(max(confidence * mult, 0.0), 1.0))
+                if self.ai_log_store is not None:
+                    self.ai_log_store.append(
+                        AiLogEvent(
+                            stage=BotPhase.QUALIFY.value,
+                            model="AuraQuant.SymbolWinRate",
+                            input={"symbol": tick.symbol},
+                            output={"win_rate": round(wr, 4), "multiplier": round(mult, 4)},
+                            explanation="Confidence adjusted by per-symbol win rate.",
+                            timestamp=tick.now,
+                        )
+                    )
+            except Exception:
+                pass
+
+        # Optional funding rate filter: reduce confidence if trade is crowded
+        if os.getenv("USE_FUNDING_RATE_FILTER", "0") == "1":
+            try:
+                client = WeexPrivateRestClient()
+                contract_symbol = to_weex_contract_symbol(tick.symbol)
+                fr = client.get_funding_rate(contract_symbol)
+                if fr is not None:
+                    # Thresholds are in percentage units (e.g., 0.02 = 0.02%)
+                    pos_th = float(os.getenv("FUNDING_POS_THRESHOLD", "0.02"))
+                    neg_th = float(os.getenv("FUNDING_NEG_THRESHOLD", "-0.02"))
+                    mult_high = float(os.getenv("FUNDING_HIGH_CONF_MULT", "0.85"))
+                    mult_low = float(os.getenv("FUNDING_LOW_CONF_MULT", "0.85"))
+                    if signal.side == "LONG" and fr > pos_th:
+                        confidence = float(min(max(confidence * mult_high, 0.0), 1.0))
+                    elif signal.side == "SHORT" and fr < neg_th:
+                        confidence = float(min(max(confidence * mult_low, 0.0), 1.0))
+                    if self.ai_log_store is not None:
+                        self.ai_log_store.append(
+                            AiLogEvent(
+                                stage=BotPhase.QUALIFY.value,
+                                model="AuraQuant.FundingRate",
+                                input={"symbol": tick.symbol, "contract_symbol": contract_symbol},
+                                output={"funding_rate_pct": fr, "side": signal.side, "confidence": round(confidence, 6)},
+                                explanation="Confidence adjusted by funding rate crowding.",
+                                timestamp=tick.now,
+                            )
+                        )
+            except Exception:
+                pass
 
         try:
             mult = self._offline_policy_multiplier(tick.symbol, signal.side)
@@ -541,33 +628,32 @@ class Orchestrator:
         }
         log_json(self.logger, payload, level=logging.INFO)
 
-        if self.ai_log_store is not None:
-            self.ai_log_store.append(
-                AiLogEvent(
-                    stage=BotPhase.ENTER.value,
-                    model="AuraQuant.RiskEngine",
-                    input={
-                        "intent": {
-                            "symbol": intent.symbol,
-                            "side": intent.side,
-                            "entry_price": intent.entry_price,
-                            "atr": intent.atr,
-                            "confidence": intent.confidence,
-                            "requested_leverage": intent.requested_leverage,
-                        },
-                        "equity_now": round(equity_now, 6),
+        if self.ai_log_store is not None or self.ai_log_uploader is not None:
+            self._push_ai_log(
+                stage=BotPhase.ENTER.value,
+                model="AuraQuant.RiskEngine",
+                input_dict={
+                    "intent": {
+                        "symbol": intent.symbol,
+                        "side": intent.side,
+                        "entry_price": intent.entry_price,
+                        "atr": intent.atr,
+                        "confidence": intent.confidence,
+                        "requested_leverage": intent.requested_leverage,
                     },
-                    output={
-                        "allowed": decision.allowed,
-                        "decision": decision.decision,
-                        "reason": decision.reason,
-                        "notional_usdt": decision.position_notional_usdt,
-                        "stop_loss": decision.stop_loss,
-                        "take_profit": decision.take_profit,
-                    },
-                    explanation=decision.reason,
-                    timestamp=tick.now,
-                )
+                    "equity_now": round(equity_now, 6),
+                    "phase": BotPhase.ENTER.value,
+                },
+                output_dict={
+                    "allowed": decision.allowed,
+                    "decision": decision.decision,
+                    "reason": decision.reason,
+                    "notional_usdt": decision.position_notional_usdt,
+                    "stop_loss": decision.stop_loss,
+                    "take_profit": decision.take_profit,
+                },
+                explanation=decision.reason,
+                timestamp=tick.now,
             )
 
         if not decision.allowed:
