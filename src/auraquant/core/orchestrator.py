@@ -454,6 +454,15 @@ class Orchestrator:
         sentiment_strength = min(max(abs(report.score), 0.0), 1.0)
         confidence = float(min(max(sentiment_strength * signal.confidence, 0.0), 1.0))
 
+        # Floor confidence using correlation strength to avoid zeroing out when sentiment is neutral-ish
+        try:
+            corr_floor_mult = float(os.getenv("CORR_CONF_FLOOR_MULT", "0.2"))
+        except Exception:
+            corr_floor_mult = 0.2
+        corr_floor_mult = float(min(max(corr_floor_mult, 0.0), 1.0))
+        if corr_floor_mult > 0.0:
+            confidence = float(min(max(max(confidence, signal.confidence * corr_floor_mult), 0.0), 1.0))
+
         # Note: ML never bypasses RiskEngine; it only adjusts *intent confidence*.
         p_win = None
         if self.learner is not None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -142,6 +143,7 @@ class GeminiScorer:
                     config=types.GenerateContentConfig(
                         temperature=temperature,
                         max_output_tokens=max_tokens,
+                        response_mime_type="application/json",
                     )
                 )
                 
@@ -250,27 +252,12 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
         
         try:
             logger.debug(f"[GeminiScorer] Raw response: {raw_text[:200]}")
-            
-            # Extract JSON from markdown code blocks or cleanup response
-            if "```" in raw_text:
-                parts = raw_text.split("```")
-                for part in parts:
-                    part = part.strip()
-                    if part.startswith("json"):
-                        part = part[4:].strip()
-                    if part.startswith("{"):
-                        raw_text = part
-                        break
-            
-            raw_text = raw_text.strip()
-            if not raw_text.startswith("{"):
-                # Try to find JSON object within the text
-                start_idx = raw_text.find("{")
-                end_idx = raw_text.rfind("}")
-                if start_idx != -1 and end_idx != -1:
-                    raw_text = raw_text[start_idx:end_idx+1]
-            
-            result = json.loads(raw_text)
+
+            extracted = self._extract_json_text(raw_text)
+            if not extracted:
+                raise json.JSONDecodeError("No JSON object found", raw_text, 0)
+
+            result = json.loads(extracted)
             
             score = float(result.get("score", result.get("sentiment_score", 0.0)))
             score = max(-1.0, min(1.0, score))
@@ -287,7 +274,7 @@ Scoring: positive number = optimistic outlook, negative = cautious outlook, near
                 confidence=confidence,
                 reasoning=reasoning,
                 model=self.model_name,
-                raw_response=raw_text
+                raw_response=extracted
             )
             
         except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -367,6 +354,31 @@ Be direct, mention key signals."""
             f"based on {sentiment_desc} sentiment (score: {sentiment_score:+.2f}) "
             f"with {confidence:.0%} confidence. Powered by AuraQuant AI."
         )
+
+    def _extract_json_text(self, text: str) -> Optional[str]:
+        """Robust JSON extraction from model responses."""
+        if not text:
+            return None
+
+        t = text.strip()
+
+        if "```" in t:
+            parts = t.split("```")
+            for part in parts:
+                candidate = part.strip()
+                if candidate.startswith("json"):
+                    candidate = candidate[4:].strip()
+                if candidate.startswith("{") and "}" in candidate:
+                    return candidate
+
+        if t.startswith("{") and t.endswith("}"):
+            return t
+
+        match = re.search(r"\{.*\}", t, re.DOTALL)
+        if match:
+            return match.group(0).strip()
+
+        return None
 
 
 # Global singleton
