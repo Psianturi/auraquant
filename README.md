@@ -39,9 +39,11 @@ AuraQuant is an AI-driven trading agent integrating NLP sentiment analysis, cros
 
 - **State Machine** - Prevents order spam and race conditions
 - **Circuit Breaker** - Auto-stop on daily drawdown or loss streak
-- **ATR-based SL/TP** - Dynamic stops based on volatility
+- **ATR-based SL/TP** - Dynamic stops based on volatility with symbol-specific thresholds (BTC/ETH)
+- **Correlation Confidence Floor** - Prevents zero confidence when sentiment is neutral but correlation is strong
+- **Gemini 2.5 Flash NLP** - AI sentiment analysis with robust JSON parsing and fallback
 - **Online Learning** - Adaptive P(win) estimation from trade outcomes
-- **AI Log Store** - NDJSON format for audit trail
+- **AI Log Store** - NDJSON format with order_id tracking for full audit trail
 
 ## Quick Start
 
@@ -116,7 +118,7 @@ This will run comprehensive tests on all components and generate performance rep
 
 3. **Local Monitoring (Fallback):** If both server-side modes are off, the bot monitors price locally via `on_price_tick()` and sends market close orders when SL/TP is hit. This requires the bot to be continuously running.
 
-4. **Max Hold Timeout:** Positions held longer than `MAX_HOLD_SECONDS` (default: 1800s)
+4. **Max Hold Timeout:** Positions held longer than `MAX_HOLD_SECONDS` (default: 1800s). If position is in loss, can extend once via `MAX_HOLD_LOSS_EXTEND=1` for `MAX_HOLD_LOSS_EXTEND_SECONDS`. Max extensions controlled by `MAX_HOLD_LOSS_EXTEND_MAX_COUNT` (default: 1).
 
 5. **No Single-Position Close Endpoint:** WEEX doesn't have a dedicated single-position close endpoint. Closing is done via `placeOrder` with type=3 (close long) or type=4 (close short).
 
@@ -125,6 +127,10 @@ This will run comprehensive tests on all components and generate performance rep
 WEEX_USE_PRESET_SLTP=0         
 WEEX_USE_SERVER_TPSL_AFTER_OPEN=1  # Place TP/SL plan orders after open 
 MAX_HOLD_SECONDS=1800          
+MAX_HOLD_LOSS_EXTEND=1        
+MAX_HOLD_LOSS_EXTEND_SECONDS=400 
+MAX_HOLD_LOSS_EXTEND_MAX_COUNT=1 
+MAX_HOLD_PROFIT_FORCE_CLOSE=1  # Force close if profitable at max-hold
 WEEX_CLOSE_RETRY_COOLDOWN_SECONDS=60  # Cooldown between close retries
 ```
 
@@ -161,6 +167,7 @@ src/auraquant/
 - `risk_per_trade_pct` - Position size as percentage of equity
 - `sl_atr_mult` - Stop loss multiplier based on ATR
 - `tp_atr_mult` - Take profit multiplier based on ATR
+- `min_atr_for_trade_pct` - Minimum ATR% threshold (symbol-specific: BTC 0.00003%, ETH 0.00008%, others 0.00014%)
 
 ### Environment Variables
 
