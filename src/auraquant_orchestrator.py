@@ -365,6 +365,14 @@ class AutonomousOrchestratorTest:
             risk.max_position_notional_pct = 4.0
         risk.sl_atr_mult = float(os.getenv("SL_ATR_MULT", "2.85"))  
         risk.tp_atr_mult = float(os.getenv("TP_ATR_MULT", "2.4"))
+
+        # Volatility guard (prevents trading when ATR is too tiny vs price).
+        try:
+            risk.min_atr_for_trade_pct = float(
+                os.getenv("RISK_MIN_ATR_FOR_TRADE_PCT", os.getenv("MIN_ATR_FOR_TRADE_PCT", ""))
+            )
+        except Exception:
+            pass
         client = WeexPrivateRestClient()
         execution = WeexOrderManager(client=client)
 

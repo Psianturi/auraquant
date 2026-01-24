@@ -327,13 +327,48 @@ class Orchestrator:
         # --------------------------------
 
         effective_bias = report.bias
-        use_momentum_override = os.getenv("USE_MOMENTUM_OVERRIDE", "1") == "1"
+        
+        # Calculate price position in 24h range (0=low, 1=high)
+        price_position_24h = 0.5 
+        if current_market and current_market.high_24h and current_market.low_24h:
+            high = float(current_market.high_24h)
+            low = float(current_market.low_24h)
+            current = float(current_market.current_price)
+            if high > low:
+                price_position_24h = (current - low) / (high - low)
+        
+        #  Inverse bias based on 24h price position
+        # High price (>0.85) → favor SHORT, Low price (<0.15) → favor LONG
+        contrarian_mode = os.getenv("CONTRARIAN_MODE", "0") == "1"
+        if contrarian_mode and current_market:
+            overbought_threshold = float(os.getenv("OVERBOUGHT_THRESHOLD", "0.85"))
+            oversold_threshold = float(os.getenv("OVERSOLD_THRESHOLD", "0.15"))
+            
+            if price_position_24h > overbought_threshold:
+
+                if effective_bias == "LONG":
+                    effective_bias = "NEUTRAL"  # Cancel LONG at high
+                elif report.bias == "NEUTRAL":
+                    effective_bias = "SHORT"  # Suggest SHORT at high
+            elif price_position_24h < oversold_threshold:
+                # Price near 24h low → favor LONG (buy low)
+                if effective_bias == "SHORT":
+                    effective_bias = "NEUTRAL" 
+                elif report.bias == "NEUTRAL":
+                    effective_bias = "LONG"  
+        
+        # MOMENTUM OVERRIDE: Force bias on strong 1h moves (with overbought/oversold check)
+        use_momentum_override = os.getenv("USE_MOMENTUM_OVERRIDE", "0") == "1" 
         if use_momentum_override and report.bias == "NEUTRAL" and current_market:
             change_1h = float(current_market.price_change_percentage_1h or 0.0)
+            momentum_threshold = float(os.getenv("MOMENTUM_OVERRIDE_MIN_CHANGE", "1.5"))  # Increase from 0.8 to 1.5
             
-            if change_1h < -0.8:
+            overbought_threshold = float(os.getenv("OVERBOUGHT_THRESHOLD", "0.85"))
+            oversold_threshold = float(os.getenv("OVERSOLD_THRESHOLD", "0.15"))
+            
+            if change_1h < -momentum_threshold and price_position_24h > oversold_threshold:
                 effective_bias = "SHORT"
-            elif change_1h > 0.8:
+            elif change_1h > momentum_threshold and price_position_24h < overbought_threshold:
                 effective_bias = "LONG"
 
         if effective_bias == "NEUTRAL":
@@ -359,15 +394,23 @@ class Orchestrator:
                 return None # Deny trade
 
         if self.ai_log_store is not None:
+            ai_input = {
+                "symbol": tick.symbol,
+                "lead_symbol": self.correlation.lead_symbol,
+                "bias": report.bias,
+                "effective_bias": effective_bias,
+            }
+            if current_market:
+                ai_input["price_position_24h"] = round(price_position_24h, 3)
+                ai_input["price_24h_high"] = current_market.high_24h
+                ai_input["price_24h_low"] = current_market.low_24h
+                ai_input["price_current"] = current_market.current_price
+            
             self.ai_log_store.append(
                 AiLogEvent(
                     stage=BotPhase.QUALIFY.value,
                     model="AuraQuant.CorrelationTrigger",
-                    input={
-                        "symbol": tick.symbol,
-                        "lead_symbol": self.correlation.lead_symbol,
-                        "bias": report.bias,
-                    },
+                    input=ai_input,
                     output={
                         "side": signal.side,
                         "confidence": round(signal.confidence, 6),
