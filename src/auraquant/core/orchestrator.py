@@ -740,15 +740,6 @@ class Orchestrator:
             payload2["order_id"] = str(order_id)
         log_json(self.logger, payload2, level=logging.INFO)
 
-        # Get order_id from the opened position if available
-        order_id = None
-        try:
-            pos = self.execution.position()
-            if pos is not None and hasattr(pos, "order_id"):
-                order_id = getattr(pos, "order_id", None)
-        except Exception:
-            pass
-
         if self.ai_log_store is not None or self.ai_log_uploader is not None:
             self._push_ai_log(
                 stage="EXECUTION",
