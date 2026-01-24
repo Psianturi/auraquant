@@ -480,6 +480,7 @@ class AutonomousOrchestratorTest:
 
         last_progress_log = 0  # Track last progress log time (minutes)
         last_max_hold_close_attempt_ts = 0.0
+        self._hold_extend_count = 0
         try:
             max_hold_retry_interval_seconds = float(
                 os.getenv("MAX_HOLD_RETRY_INTERVAL_SECONDS", "60")
@@ -514,6 +515,7 @@ class AutonomousOrchestratorTest:
                         self._hold_anchor_symbol = str(pos.symbol)
                         self._hold_anchor_at = pos.opened_at
                         self._hold_limit_seconds = None
+                        self._hold_extend_count = 0
 
                     anchor = self._hold_anchor_at or pos.opened_at
                     held_for = (now - anchor).total_seconds()
@@ -549,18 +551,30 @@ class AutonomousOrchestratorTest:
                         if pnl_pct is not None and pnl_pct <= 0 and max_hold_loss_extend:
                             # Extend hold window: wait another configured window before trying again.
                             try:
-                                extend_seconds = int(os.getenv("MAX_HOLD_LOSS_EXTEND_SECONDS", "600"))
+                                extend_max_count = int(os.getenv("MAX_HOLD_LOSS_EXTEND_MAX_COUNT", "0"))
                             except Exception:
-                                extend_seconds = 600
-                            if extend_seconds <= 0:
-                                extend_seconds = 600
-                            self._hold_anchor_at = now
-                            self._hold_limit_seconds = int(extend_seconds)
-                            logger.warning(
-                                f"[MANAGE] Max hold exceeded but in loss (pnl_pct={pnl_pct:.3f}%). "
-                                f"Extending hold window by {extend_seconds}s."
-                            )
-                            continue
+                                extend_max_count = 0
+                            current_extend_count = int(getattr(self, "_hold_extend_count", 0) or 0)
+                            can_extend = (extend_max_count <= 0) or (current_extend_count < extend_max_count)
+                            if can_extend:
+                                try:
+                                    extend_seconds = int(os.getenv("MAX_HOLD_LOSS_EXTEND_SECONDS", "600"))
+                                except Exception:
+                                    extend_seconds = 600
+                                if extend_seconds <= 0:
+                                    extend_seconds = 600
+                                self._hold_anchor_at = now
+                                self._hold_limit_seconds = int(extend_seconds)
+                                self._hold_extend_count = current_extend_count + 1
+                                logger.warning(
+                                    f"[MANAGE] Max hold exceeded but in loss (pnl_pct={pnl_pct:.3f}%). "
+                                    f"Extending hold window by {extend_seconds}s (count={self._hold_extend_count}{'' if extend_max_count<=0 else f'/{extend_max_count}'})."
+                                )
+                                continue
+                            else:
+                                logger.warning(
+                                    f"[MANAGE] Max hold loss-extend cap reached (count={current_extend_count}/{extend_max_count}); proceeding to close path."
+                                )
 
                         close_reason = "MAX_HOLD"
                         if pnl_pct is not None and pnl_pct > 0 and max_hold_profit_force_close:
@@ -629,6 +643,7 @@ class AutonomousOrchestratorTest:
                     self._hold_anchor_at = None
                     self._hold_anchor_symbol = None
                     self._hold_limit_seconds = None
+                    self._hold_extend_count = 0
 
                 active_symbol = self._pick_active_symbol()
                 self.orchestrator.config.symbol = active_symbol
