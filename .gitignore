@@ -19,6 +19,9 @@ venv/
 # Generated demo logs
 ai_logs/
 
+# Documentation (internal only, do not commit)
+docs/
+
 # Runtime cache (CoinGecko snapshots, etc.)
 runtime_cache/
 

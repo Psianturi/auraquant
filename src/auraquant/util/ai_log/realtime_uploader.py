@@ -129,6 +129,25 @@ class RealTimeAiLogUploader:
         self._background_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        # Collect sensitive tokens to mask in any uploader logs
+        self._sensitive_tokens: list[str] = []
+        for tok in [
+            weex_api_key or "",
+            weex_secret_key or "",
+            weex_passphrase or "",
+            os.getenv("WEEX_AI_LOG_AUTH_HEADER", ""),
+            os.getenv("COINGECKO_API_KEY", ""),
+        ]:
+            s = str(tok).strip()
+            if s:
+                self._sensitive_tokens.append(s)
+
+    def _mask_text(self, text: Any) -> str:
+        s = str(text)
+        for tok in self._sensitive_tokens:
+            if tok and tok in s:
+                s = s.replace(tok, "***")
+        return s
 
     def _sanitize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize and down-scope payload to metadata-only if configured.
@@ -262,7 +281,7 @@ class RealTimeAiLogUploader:
             sanitized = self._sanitize_payload(event_payload)
             return self._upload_sync(sanitized)
         except Exception as e:
-            logger.warning(f"[AI Log Uploader] Upload failed (will retry): {e}")
+            logger.warning(f"[AI Log Uploader] Upload failed (will retry): {self._mask_text(e)}")
             # Queue for retry
             entry = QueuedLogEntry(
                 event_payload=event_payload,
@@ -328,7 +347,7 @@ class RealTimeAiLogUploader:
                 time.sleep(self.flush_interval_seconds)
                 self._flush_queue()
             except Exception as e:
-                logger.error(f"[AI Log Uploader] Flush loop error: {e}")
+                logger.error(f"[AI Log Uploader] Flush loop error: {self._mask_text(e)}")
 
     def _flush_queue(self) -> None:
         """Attempt to upload all queued events."""
@@ -349,7 +368,7 @@ class RealTimeAiLogUploader:
                 logger.info(f"[AI Log Uploader] Successfully uploaded queued event (retry #{entry.retry_count})")
             except Exception as e:
                 logger.warning(
-                    f"[AI Log Uploader] Retry #{entry.retry_count + 1} failed. Re-queuing: {e}"
+                    f"[AI Log Uploader] Retry #{entry.retry_count + 1} failed. Re-queuing: {self._mask_text(e)}"
                 )
                 # Re-queue with incremented retry count
                 entry.retry_count += 1
