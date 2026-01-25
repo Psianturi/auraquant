@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import json
+import os
 
 import logging
 
@@ -199,7 +200,18 @@ class RiskEngine:
         self.circuit_breaker.set_day_start_equity_if_missing(equity_now, now)
 
         atr_pct = float(intent_data.atr) / float(intent_data.entry_price) if float(intent_data.entry_price) > 0 else 0.0
-        if atr_pct < self.min_atr_for_trade_pct:
+        
+        min_atr_threshold = self.min_atr_for_trade_pct
+        try:
+            base = intent_data.symbol.split("/")[0].upper()
+            if base == "BTC":
+                min_atr_threshold = float(os.getenv("RISK_MIN_ATR_BTC_PCT", "0.00003"))  
+            elif base == "ETH":
+                min_atr_threshold = float(os.getenv("RISK_MIN_ATR_ETH_PCT", "0.00008"))
+        except Exception:
+            pass
+        
+        if atr_pct < min_atr_threshold:
             payload = {
                 "module": "RiskEngine",
                 "timestamp": utc_iso(now),
@@ -208,7 +220,7 @@ class RiskEngine:
                 "reason": "MARKET_TOO_SIDEWAYS",
                 "metrics": {
                     "atr_pct": atr_pct,
-                    "min_atr_for_trade_pct": self.min_atr_for_trade_pct,
+                    "min_atr_for_trade_pct": min_atr_threshold,
                     "atr": float(intent_data.atr),
                     "entry_price": float(intent_data.entry_price),
                 },
@@ -217,7 +229,7 @@ class RiskEngine:
             return RiskDecision(
                 allowed=False,
                 decision="DENIED",
-                reason=f"Market too sideways (ATR {atr_pct*100:.3f}% < min {self.min_atr_for_trade_pct*100:.2f}%)",
+                reason=f"Market too sideways (ATR {atr_pct*100:.3f}% < min {min_atr_threshold*100:.2f}%)",
                 symbol=intent_data.symbol,
                 side=intent_data.side,
                 entry_price=float(intent_data.entry_price),

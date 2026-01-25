@@ -456,9 +456,9 @@ class Orchestrator:
 
         # Floor confidence using correlation strength to avoid zeroing out when sentiment is neutral-ish
         try:
-            corr_floor_mult = float(os.getenv("CORR_CONF_FLOOR_MULT", "0.2"))
+            corr_floor_mult = float(os.getenv("CORR_CONF_FLOOR_MULT", "0.34"))
         except Exception:
-            corr_floor_mult = 0.2
+            corr_floor_mult = 0.34
         corr_floor_mult = float(min(max(corr_floor_mult, 0.0), 1.0))
         if corr_floor_mult > 0.0:
             confidence = float(min(max(max(confidence, signal.confidence * corr_floor_mult), 0.0), 1.0))
