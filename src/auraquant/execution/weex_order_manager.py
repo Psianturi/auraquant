@@ -28,8 +28,8 @@ class WeexLivePosition:
     stop_loss: float
     take_profit: float
     notional_usdt: float
-    requested_notional_usdt: Optional[float] = None
     opened_at: datetime
+    requested_notional_usdt: Optional[float] = None
     is_open: bool = True
     order_id: Optional[str] = None
     size: float = 0.0
