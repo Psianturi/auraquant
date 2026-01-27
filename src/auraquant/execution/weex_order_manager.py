@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 
@@ -28,6 +28,7 @@ class WeexLivePosition:
     stop_loss: float
     take_profit: float
     notional_usdt: float
+    requested_notional_usdt: Optional[float] = None
     opened_at: datetime
     is_open: bool = True
     order_id: Optional[str] = None
@@ -246,7 +247,32 @@ class WeexOrderManager(BaseOrderManager):
         weex_symbol = self._resolve_weex_symbol(symbol)
         self.set_leverage(symbol=symbol, leverage=self.default_leverage)
 
-        size = self._compute_order_size(weex_symbol=weex_symbol, notional_usdt=float(notional_usdt), price=float(entry_price))
+        requested_notional = float(notional_usdt)
+        size = self._compute_order_size(
+            weex_symbol=weex_symbol,
+            notional_usdt=requested_notional,
+            price=float(entry_price),
+        )
+
+        effective_notional = float(size) * float(entry_price)
+        # Some contracts (e.g. BTC) have min lot sizes that can bump the real notional.
+        notional_usdt = effective_notional
+
+        if requested_notional > 0 and abs(effective_notional - requested_notional) / requested_notional > 0.02:
+            try:
+                min_order_size, step_size = self._get_contract_rules(weex_symbol)
+            except Exception:
+                min_order_size, step_size = (None, 0.0)
+            logger.warning(
+                "[WEEX] Order size bumped by contract rules: symbol=%s weex_symbol=%s requested_notional=%.4f effective_notional=%.4f size=%s minOrderSize=%s stepSize=%s",
+                symbol,
+                weex_symbol,
+                float(requested_notional),
+                float(effective_notional),
+                self._format_size(float(size)),
+                str(min_order_size),
+                str(step_size),
+            )
 
         type_code = "1" if side == "LONG" else "2"  # 1 open long, 2 open short
         body = {
@@ -295,6 +321,7 @@ class WeexOrderManager(BaseOrderManager):
             stop_loss=float(stop_loss),
             take_profit=float(take_profit),
             notional_usdt=float(notional_usdt),
+            requested_notional_usdt=float(requested_notional),
             opened_at=now,
             order_id=str(order_id) if order_id is not None else None,
             size=float(size),
@@ -316,6 +343,76 @@ class WeexOrderManager(BaseOrderManager):
                 logger.warning(f"[WEEX] Failed to place server-side TP/SL plan orders (non-fatal): {e}")
 
         return pos
+
+    def estimate_required_margin(
+        self,
+        *,
+        symbol: str,
+        entry_price: float,
+        notional_usdt: float,
+        leverage: Optional[float] = None,
+    ) -> float:
+        """Estimate required margin using WEEX contract rules (min/step size).
+
+        This mirrors the actual order sizing in open_position(), preventing
+        false-positive margin pre-checks (e.g. BTC min lot bumps).
+        """
+
+        weex_symbol = self._resolve_weex_symbol(symbol)
+
+        lev = float(leverage or 0.0)
+        if lev <= 0:
+            lev = float(self.default_leverage)
+        lev = max(lev, 1.0)
+
+        size = self._compute_order_size(
+            weex_symbol=weex_symbol,
+            notional_usdt=float(notional_usdt),
+            price=float(entry_price),
+        )
+        effective_notional = float(size) * float(entry_price)
+        return float(max(effective_notional / lev, 0.0))
+
+    def debug_order_sizing(
+        self,
+        *,
+        symbol: str,
+        entry_price: float,
+        notional_usdt: float,
+        leverage: Optional[float] = None,
+    ) -> Optional[dict[str, Any]]:
+        try:
+            weex_symbol = self._resolve_weex_symbol(symbol)
+            min_order_size, step_size = self._get_contract_rules(weex_symbol)
+            size = self._compute_order_size(
+                weex_symbol=weex_symbol,
+                notional_usdt=float(notional_usdt),
+                price=float(entry_price),
+            )
+
+            lev = float(leverage or 0.0)
+            if lev <= 0:
+                lev = float(self.default_leverage)
+            lev = max(lev, 1.0)
+
+            effective_notional = float(size) * float(entry_price)
+            required_margin = float(effective_notional) / float(lev)
+
+            return {
+                "symbol": str(symbol),
+                "weex_symbol": str(weex_symbol),
+                "requested_notional_usdt": float(notional_usdt),
+                "entry_price": float(entry_price),
+                "min_order_size": float(min_order_size) if min_order_size is not None else None,
+                "step_size": float(step_size),
+                "computed_size": float(size),
+                "computed_size_str": self._format_size(float(size)),
+                "effective_notional_usdt": float(effective_notional),
+                "leverage_used": float(lev),
+                "required_margin_usdt": float(required_margin),
+            }
+        except Exception:
+            return None
 
     @staticmethod
     def _looks_like_open_sltp_invalid(msg: str) -> bool:

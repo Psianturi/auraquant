@@ -673,24 +673,64 @@ class Orchestrator:
         assert decision.take_profit is not None
 
         # Pre-check margin before attempting order (avoid 40015 errors)
+        # IMPORTANT: match the execution layer's real order sizing (min lot / step size)
+        # and its actual leverage setting when possible.
         leverage = float(decision.leverage or 0.0)
         if leverage <= 0:
             leverage = float(getattr(intent, "requested_leverage", 1.0) or 1.0)
         leverage = max(leverage, 1.0)
+        exec_default_lev = getattr(self.execution, "default_leverage", None)
+        if exec_default_lev is not None:
+            try:
+                leverage = max(float(exec_default_lev), 1.0)
+            except Exception:
+                pass
 
-        required_margin = decision.position_notional_usdt / leverage
-        if hasattr(self.execution, 'available_margin'):
+        required_margin = None
+        try:
+            required_margin = self.execution.estimate_required_margin(
+                symbol=tick.symbol,
+                entry_price=float(decision.entry_price),
+                notional_usdt=float(decision.position_notional_usdt),
+                leverage=float(leverage),
+            )
+        except Exception:
+            required_margin = float(decision.position_notional_usdt) / float(leverage)
+
+        if hasattr(self.execution, "available_margin"):
             avail = self.execution.available_margin()
-            if avail < required_margin * 1.1: 
-                log_json(self.logger, {
-                    "module": "Orchestrator",
-                    "timestamp": utc_iso(tick.now),
-                    "event": "ORDER_SKIPPED",
-                    "symbol": tick.symbol,
-                    "reason": "Insufficient margin (pre-check)",
-                    "available": round(avail, 2),
-                    "required": round(required_margin, 2),
-                }, level=logging.WARNING)
+            if avail < float(required_margin) * 1.1:
+                sizing_debug = None
+                try:
+                    base = str(tick.symbol).split("/")[0].upper()
+                except Exception:
+                    base = ""
+                if base == "BTC" and hasattr(self.execution, "debug_order_sizing"):
+                    try:
+                        sizing_debug = self.execution.debug_order_sizing(
+                            symbol=tick.symbol,
+                            entry_price=float(decision.entry_price),
+                            notional_usdt=float(decision.position_notional_usdt),
+                            leverage=float(leverage),
+                        )
+                    except Exception:
+                        sizing_debug = None
+
+                log_json(
+                    self.logger,
+                    {
+                        "module": "Orchestrator",
+                        "timestamp": utc_iso(tick.now),
+                        "event": "ORDER_SKIPPED",
+                        "symbol": tick.symbol,
+                        "reason": "Insufficient margin (pre-check)",
+                        "available": round(avail, 2),
+                        "required": round(float(required_margin), 2),
+                        "leverage_used": round(float(leverage), 2),
+                        "btc_sizing_debug": sizing_debug,
+                    },
+                    level=logging.WARNING,
+                )
                 return
 
         try:
@@ -706,6 +746,22 @@ class Orchestrator:
         except RuntimeError as e:
             err_msg = str(e)
             if "margin" in err_msg.lower() or "insufficient" in err_msg.lower():
+                sizing_debug = None
+                try:
+                    base = str(tick.symbol).split("/")[0].upper()
+                except Exception:
+                    base = ""
+                if base == "BTC" and hasattr(self.execution, "debug_order_sizing"):
+                    try:
+                        sizing_debug = self.execution.debug_order_sizing(
+                            symbol=tick.symbol,
+                            entry_price=float(decision.entry_price),
+                            notional_usdt=float(decision.position_notional_usdt),
+                            leverage=float(leverage),
+                        )
+                    except Exception:
+                        sizing_debug = None
+
                 log_json(self.logger, {
                     "module": "Orchestrator",
                     "timestamp": utc_iso(tick.now),
@@ -713,6 +769,7 @@ class Orchestrator:
                     "symbol": tick.symbol,
                     "reason": "Insufficient margin",
                     "error": err_msg[:100],
+                    "btc_sizing_debug": sizing_debug,
                 }, level=logging.WARNING)
                 return
             if "40015" in err_msg:

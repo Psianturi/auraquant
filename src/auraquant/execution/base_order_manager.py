@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 from ..risk.types import Side, TradeResult
 
@@ -61,4 +61,41 @@ class BaseOrderManager(ABC):
         Paper execution is already authoritative; live execution should override.
         """
 
+        return None
+
+    def estimate_required_margin(
+        self,
+        *,
+        symbol: str,
+        entry_price: float,
+        notional_usdt: float,
+        leverage: Optional[float] = None,
+    ) -> float:
+
+        _ = symbol
+        _ = entry_price
+
+        lev = float(leverage or 0.0)
+        if lev <= 0:
+            lev = 1.0
+        return float(max(float(notional_usdt) / lev, 0.0))
+
+    def debug_order_sizing(
+        self,
+        *,
+        symbol: str,
+        entry_price: float,
+        notional_usdt: float,
+        leverage: Optional[float] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Optional structured debug info for how an execution backend sizes orders.
+
+        Live exchanges may override to provide min lot/step, computed qty, etc.
+        Orchestrator uses this only for enriched logging.
+        """
+
+        _ = symbol
+        _ = entry_price
+        _ = notional_usdt
+        _ = leverage
         return None
