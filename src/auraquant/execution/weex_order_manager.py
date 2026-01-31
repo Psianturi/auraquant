@@ -112,8 +112,8 @@ class WeexOrderManager(BaseOrderManager):
         self._positions_opened: int = 0
         self._trades_closed: int = 0
         self._pending_trade_result: Optional[TradeResult] = None
-        # Cache: {weex_symbol: (min_order_size, step_size)}
-        self._contract_rules_cache: Dict[str, Tuple[Optional[float], float]] = {}
+         # - contract_unit is the base-asset amount per contract (e.g. 0.001 BTC/contract).
+        self._contract_rules_cache: Dict[str, Tuple[Optional[float], float, float]] = {}
         # Track last close attempt to prevent spam
         self._last_close_attempt: float = 0.0
 
@@ -245,7 +245,11 @@ class WeexOrderManager(BaseOrderManager):
             raise RuntimeError("Live execution disabled. Set WEEX_EXECUTE_ORDER=1 to place real orders.")
 
         weex_symbol = self._resolve_weex_symbol(symbol)
-        self.set_leverage(symbol=symbol, leverage=self.default_leverage)
+        try:
+            self.set_leverage(symbol=symbol, leverage=self.default_leverage)
+        except Exception as e:
+
+            logger.warning(f"[WEEX] Set leverage skipped (non-fatal): {e}")
 
         requested_notional = float(notional_usdt)
         size = self._compute_order_size(
@@ -254,17 +258,19 @@ class WeexOrderManager(BaseOrderManager):
             price=float(entry_price),
         )
 
-        effective_notional = float(size) * float(entry_price)
+        _min_contracts, _step_contracts, contract_unit = self._get_contract_rules(weex_symbol)
+        coin_qty = float(size) * float(contract_unit)
+        effective_notional = float(coin_qty) * float(entry_price)
         # Some contracts (e.g. BTC) have min lot sizes that can bump the real notional.
         notional_usdt = effective_notional
 
         if requested_notional > 0 and abs(effective_notional - requested_notional) / requested_notional > 0.02:
             try:
-                min_order_size, step_size = self._get_contract_rules(weex_symbol)
+                min_order_size, step_size, contract_unit = self._get_contract_rules(weex_symbol)
             except Exception:
-                min_order_size, step_size = (None, 0.0)
+                min_order_size, step_size, contract_unit = (None, 0.0, 1.0)
             logger.warning(
-                "[WEEX] Order size bumped by contract rules: symbol=%s weex_symbol=%s requested_notional=%.4f effective_notional=%.4f size=%s minOrderSize=%s stepSize=%s",
+                "[WEEX] Order size bumped by contract rules: symbol=%s weex_symbol=%s requested_notional=%.4f effective_notional=%.4f size=%s minContracts=%s stepContracts=%s contractUnit=%s",
                 symbol,
                 weex_symbol,
                 float(requested_notional),
@@ -272,6 +278,7 @@ class WeexOrderManager(BaseOrderManager):
                 self._format_size(float(size)),
                 str(min_order_size),
                 str(step_size),
+                str(contract_unit),
             )
 
         type_code = "1" if side == "LONG" else "2"  # 1 open long, 2 open short
@@ -370,7 +377,8 @@ class WeexOrderManager(BaseOrderManager):
             notional_usdt=float(notional_usdt),
             price=float(entry_price),
         )
-        effective_notional = float(size) * float(entry_price)
+        _min_contracts, _step_contracts, contract_unit = self._get_contract_rules(weex_symbol)
+        effective_notional = float(size) * float(contract_unit) * float(entry_price)
         return float(max(effective_notional / lev, 0.0))
 
     def debug_order_sizing(
@@ -383,7 +391,7 @@ class WeexOrderManager(BaseOrderManager):
     ) -> Optional[dict[str, Any]]:
         try:
             weex_symbol = self._resolve_weex_symbol(symbol)
-            min_order_size, step_size = self._get_contract_rules(weex_symbol)
+            min_order_size, step_size, contract_unit = self._get_contract_rules(weex_symbol)
             size = self._compute_order_size(
                 weex_symbol=weex_symbol,
                 notional_usdt=float(notional_usdt),
@@ -395,7 +403,8 @@ class WeexOrderManager(BaseOrderManager):
                 lev = float(self.default_leverage)
             lev = max(lev, 1.0)
 
-            effective_notional = float(size) * float(entry_price)
+            coin_qty = float(size) * float(contract_unit)
+            effective_notional = float(coin_qty) * float(entry_price)
             required_margin = float(effective_notional) / float(lev)
 
             return {
@@ -403,10 +412,12 @@ class WeexOrderManager(BaseOrderManager):
                 "weex_symbol": str(weex_symbol),
                 "requested_notional_usdt": float(notional_usdt),
                 "entry_price": float(entry_price),
-                "min_order_size": float(min_order_size) if min_order_size is not None else None,
-                "step_size": float(step_size),
-                "computed_size": float(size),
-                "computed_size_str": self._format_size(float(size)),
+                "min_contracts": float(min_order_size) if min_order_size is not None else None,
+                "step_contracts": float(step_size),
+                "contract_unit": float(contract_unit),
+                "computed_contracts": float(size),
+                "computed_contracts_str": self._format_size(float(size)),
+                "computed_coin_qty": float(coin_qty),
                 "effective_notional_usdt": float(effective_notional),
                 "leverage_used": float(lev),
                 "required_margin_usdt": float(required_margin),
@@ -1082,7 +1093,7 @@ class WeexOrderManager(BaseOrderManager):
         if resp.status_code != 200:
             raise RuntimeError(f"WEEX close order failed HTTP {resp.status_code}: {resp.text[:200]}")
 
-    def _get_contract_rules(self, weex_symbol: str) -> Tuple[Optional[float], float]:
+    def _get_contract_rules(self, weex_symbol: str) -> Tuple[Optional[float], float, float]:
         cached = self._contract_rules_cache.get(weex_symbol)
         if cached is not None:
             return cached
@@ -1091,13 +1102,13 @@ class WeexOrderManager(BaseOrderManager):
         url = f"{base_url}/capi/v2/market/contracts"
         resp = requests.get(url, params={"symbol": weex_symbol}, timeout=15)
         if resp.status_code != 200:
-            self._contract_rules_cache[weex_symbol] = (None, 1.0)
+            self._contract_rules_cache[weex_symbol] = (None, 1.0, 1.0)
             return self._contract_rules_cache[weex_symbol]
 
         try:
             payload = resp.json()
         except Exception:
-            self._contract_rules_cache[weex_symbol] = (None, 1.0)
+            self._contract_rules_cache[weex_symbol] = (None, 1.0, 1.0)
             return self._contract_rules_cache[weex_symbol]
 
         items = None
@@ -1112,9 +1123,21 @@ class WeexOrderManager(BaseOrderManager):
 
         min_order_size: Optional[float] = None
         step_size: Optional[float] = None
+        contract_unit: Optional[float] = None
 
-        if items and isinstance(items[0], dict):
-            first = items[0]
+        first: Optional[dict] = None
+        if items:
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                sym = it.get("symbol") or it.get("contract") or it.get("name")
+                if sym and str(sym).upper() == str(weex_symbol).upper():
+                    first = it
+                    break
+            if first is None and isinstance(items[0], dict):
+                first = items[0]
+
+        if first is not None:
             mos = first.get("minOrderSize")
             if isinstance(mos, (int, float)):
                 min_order_size = float(mos)
@@ -1141,29 +1164,58 @@ class WeexOrderManager(BaseOrderManager):
                     step_size = candidate
                     break
 
+            # Contract unit (base asset amount per contract). Different payloads use different keys.
+            for key in (
+                "contractSize",
+                "contract_size",
+                "contractUnit",
+                "contract_unit",
+                "contractValue",
+                "contract_value",
+                "ctVal",
+                "ct_val",
+                "multiplier",
+                "faceValue",
+                "face_value",
+            ):
+                v = first.get(key)
+                if v is None:
+                    continue
+                try:
+                    candidate = float(v)
+                except Exception:
+                    continue
+                if candidate > 0:
+                    contract_unit = candidate
+                    break
+
         if step_size is None or step_size <= 0:
             if isinstance(min_order_size, (int, float)) and float(min_order_size) > 0:
                 step_size = float(min_order_size)
             else:
                 step_size = 1.0
 
-        self._contract_rules_cache[weex_symbol] = (min_order_size, float(step_size))
+        if contract_unit is None or contract_unit <= 0:
+            contract_unit = 1.0
+
+        self._contract_rules_cache[weex_symbol] = (min_order_size, float(step_size), float(contract_unit))
         return self._contract_rules_cache[weex_symbol]
 
     def _compute_order_size(self, weex_symbol: str, notional_usdt: float, price: float) -> float:
-        min_order_size, step_size = self._get_contract_rules(weex_symbol)
+        min_contracts, step_contracts, contract_unit = self._get_contract_rules(weex_symbol)
         price = max(float(price), 1e-12)
-        raw = float(notional_usdt) / price
+        denom = float(price) * max(float(contract_unit), 1e-12)
+        raw = float(notional_usdt) / denom
 
-        if isinstance(min_order_size, (int, float)) and raw < float(min_order_size):
-            raw = float(min_order_size)
+        if isinstance(min_contracts, (int, float)) and raw < float(min_contracts):
+            raw = float(min_contracts)
 
-        step = float(step_size) if float(step_size) > 0 else 1.0
-        # Quantize down to the allowed increment (e.g. stepSize=10 => 40, 50, ...)
+        step = float(step_contracts) if float(step_contracts) > 0 else 1.0
+        # Quantize down to the allowed increment in contract units.
         floored = math.floor((raw / step) + 1e-12) * step
         # If we floored to zero but a min size exists, bump to the smallest valid step >= min.
-        if floored <= 0 and isinstance(min_order_size, (int, float)) and float(min_order_size) > 0:
-            floored = math.ceil(float(min_order_size) / step) * step
+        if floored <= 0 and isinstance(min_contracts, (int, float)) and float(min_contracts) > 0:
+            floored = math.ceil(float(min_contracts) / step) * step
 
         return float(max(floored, 0.0))
 

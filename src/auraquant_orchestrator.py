@@ -445,7 +445,12 @@ class AutonomousOrchestratorTest:
                 self.execution.set_leverage(symbol=symbols[0], leverage=int(os.getenv("WEEX_LEVERAGE", "2")))
             logger.info("[WEEX] Set leverage OK")
         except Exception as e:
-            raise RuntimeError(f"WEEX set leverage failed: {e}")
+            msg = str(e)
+            lower = msg.lower()
+            if "open orders" in lower or "failed_precondition" in lower:
+                logger.warning(f"[WEEX] Set leverage skipped due to open orders (non-fatal): {e}")
+            else:
+                raise RuntimeError(f"WEEX set leverage failed: {e}")
 
     def _pick_active_symbol(self) -> str:
         # IMPORTANT:
